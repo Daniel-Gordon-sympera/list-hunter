@@ -23,7 +23,7 @@ async def run(practice_areas_path: str) -> str:
     Args:
         practice_areas_path: Path to practice_areas.json produced by the
             discover command. Must contain ``state_slug``, ``city_slug``,
-            and ``practice_areas`` (list of dicts with a ``slug`` key).
+            and ``practice_areas`` (list of slug strings).
 
     Returns:
         Path to the generated listings.json file.
@@ -34,7 +34,8 @@ async def run(practice_areas_path: str) -> str:
 
     state_slug: str = discovery["state_slug"]
     city_slug: str = discovery["city_slug"]
-    practice_areas: list[dict] = discovery["practice_areas"]
+    practice_areas: list[str] = discovery["practice_areas"]
+    data_dir = os.path.dirname(practice_areas_path)
 
     referer = f"{config.BASE_URL}/{state_slug}/{city_slug}/"
 
@@ -44,8 +45,7 @@ async def run(practice_areas_path: str) -> str:
     async with ScraperClient() as client:
         total_pas = len(practice_areas)
 
-        for idx, pa in enumerate(practice_areas, start=1):
-            pa_slug = pa["slug"]
+        for idx, pa_slug in enumerate(practice_areas, start=1):
             log.info(f"[{idx}/{total_pas}] Crawling: {pa_slug}")
 
             page = 1
@@ -84,8 +84,6 @@ async def run(practice_areas_path: str) -> str:
                 page += 1
 
     # Write output
-    data_dir = config.DATA_DIR
-    os.makedirs(data_dir, exist_ok=True)
     output_path = os.path.join(data_dir, "listings.json")
 
     with open(output_path, "w", encoding="utf-8") as f:
