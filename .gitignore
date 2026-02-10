@@ -6,3 +6,5 @@ output/
 *.egg-info/
 .venv/
 venv/
+.playwright-mcp/
+spike.py
