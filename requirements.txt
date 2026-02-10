@@ -1,0 +1,7 @@
+httpx[http2]
+beautifulsoup4
+lxml
+tenacity
+fake-useragent
+python-slugify
+pytest
