@@ -81,6 +81,12 @@ async def run(practice_areas_path: str) -> str:
                     f"(total unique: {len(all_records)})"
                 )
 
+                # Stop if no new unique attorneys were found on this page
+                # (sponsored cards repeat on every page)
+                if new_count == 0:
+                    log.info(f"  No new attorneys on page {page}, stopping pagination")
+                    break
+
                 page += 1
 
     # Write output
