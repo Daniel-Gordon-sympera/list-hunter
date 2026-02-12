@@ -28,6 +28,9 @@ python cli.py fetch-profiles data/los-angeles_ca/listings.json
 python cli.py parse-profiles data/los-angeles_ca/
 python cli.py export data/los-angeles_ca/records.json
 
+# Re-crawl listings from scratch (ignore checkpoint)
+python cli.py crawl-listings --force data/los-angeles_ca/practice_areas.json
+
 # Re-parse without re-fetching (after fixing selectors)
 python cli.py parse-profiles data/los-angeles_ca/
 python cli.py export data/los-angeles_ca/records.json
@@ -43,13 +46,16 @@ Phases communicate through files in `data/{city}_{state}/`, not in-memory state.
 ```
 discover         → practice_areas.json    (state/city slugs + practice area list)
 crawl-listings   → listings.json          (uuid → partial AttorneyRecord + profile_url)
+                 → crawl_progress.json    (checkpoint — deleted on completion)
 fetch-profiles   → html/{uuid}.html       (raw HTML, one file per attorney — idempotent)
                  → fetch_status.json      (uuid → success/failed/skipped)
 parse-profiles   → records.json           (full 33-field AttorneyRecords, merged with listing pre-fill)
 export           → output/*.csv           (cleaned, UTF-8 BOM, QUOTE_ALL)
 ```
 
-`fetch-profiles` is naturally idempotent — skips UUIDs with existing HTML files on disk. This replaces checkpoint/resume.
+`crawl-listings` checkpoints after each practice area — interrupted runs resume automatically. Use `--force` to re-crawl from scratch.
+
+`fetch-profiles` is naturally idempotent — skips UUIDs with existing HTML files on disk.
 
 ## Project Structure
 
@@ -62,7 +68,7 @@ http_client.py              — Crawl4AI wrapper (stealth browser, semaphore, re
 spike.py                    — Validation spike (throwaway — fixture generation)
 commands/
   discover.py               — Phase 1+2: resolve location, list practice areas
-  crawl_listings.py         — Phase 3: paginate listings, pre-fill 7 fields, UUID dedup
+  crawl_listings.py         — Phase 3: paginate listings, pre-fill 7 fields, UUID dedup, checkpoint/resume
   fetch_profiles.py         — Phase 4a: download raw HTML to disk
   parse_profiles.py         — Phase 4b: parse saved HTML into records
   export.py                 — Phase 5: clean + write CSV

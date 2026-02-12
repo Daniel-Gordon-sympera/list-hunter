@@ -98,10 +98,11 @@ class TestSubcommandWiring:
         mock_run = AsyncMock(return_value="/data/listings.json")
         args = MagicMock()
         args.input = "/data/practice_areas.json"
+        args.force = False
 
         with patch("commands.crawl_listings.run", mock_run):
             cmd_crawl_listings(args)
-            mock_run.assert_awaited_once_with("/data/practice_areas.json")
+            mock_run.assert_awaited_once_with("/data/practice_areas.json", force=False)
 
     def test_cmd_fetch_profiles_calls_fetch_run(self):
         mock_run = AsyncMock(return_value="/data/html")
@@ -165,6 +166,15 @@ class TestMainDispatch:
             mock_cmd.assert_called_once()
             args = mock_cmd.call_args[0][0]
             assert args.input == "/path/to/pa.json"
+            assert args.force is False
+
+    def test_main_crawl_listings_force_flag(self):
+        with patch("sys.argv", ["cli.py", "crawl-listings", "--force", "/path/to/pa.json"]), \
+             patch("cli.cmd_crawl_listings") as mock_cmd:
+            main()
+            mock_cmd.assert_called_once()
+            args = mock_cmd.call_args[0][0]
+            assert args.force is True
 
     def test_main_fetch_profiles_dispatches(self):
         with patch("sys.argv", ["cli.py", "fetch-profiles", "/path/to/listings.json"]), \

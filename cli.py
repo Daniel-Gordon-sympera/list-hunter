@@ -58,7 +58,7 @@ def cmd_crawl_listings(args: argparse.Namespace) -> None:
     """Run the crawl-listings phase: paginate listing pages for all practice areas."""
     from commands import crawl_listings
 
-    result = asyncio.run(crawl_listings.run(args.input))
+    result = asyncio.run(crawl_listings.run(args.input, force=args.force))
     print(f"Output: {result}")
 
 
@@ -126,6 +126,12 @@ def main() -> None:
     sp_crawl.add_argument(
         "input",
         help="Path to practice_areas.json from the discover step",
+    )
+    sp_crawl.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Ignore checkpoint, re-crawl all practice areas",
     )
     sp_crawl.set_defaults(func=cmd_crawl_listings)
 

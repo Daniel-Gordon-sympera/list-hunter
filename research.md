@@ -166,7 +166,7 @@ tests/fixtures/               Saved HTML from real scraping runs
 
 4. **fetch_status.json is write-only** — The status file is written (`fetch_profiles.py:131-133`) but never read back on subsequent runs. Resume logic checks for HTML files on disk (`fetch_profiles.py:80`), not the status JSON. This means "failed" status is informational only — a failed UUID without an HTML file will be retried on next run (good), but the status file provides no additional resume intelligence.
 
-5. **No progress persistence during crawl-listings** — If the crawl crashes mid-way through 100 PAs, all progress is lost. `listings.json` is only written at the end (`crawl_listings.py:93-96`). Should write incrementally after each PA completes, or checkpoint to a temporary file.
+5. ~~**No progress persistence during crawl-listings**~~ **FIXED** — `crawl_listings.py` now checkpoints `listings.json` and `crawl_progress.json` (completed PA slugs) after each practice area. Interrupted runs resume from the last checkpoint. `--force` flag starts fresh. Atomic writes (tmp+rename) prevent corruption on crash-during-write.
 
 6. **Memory: all records in memory** — `crawl_listings.py:43` accumulates an `all_records` dict for all PAs. For very large cities (5000+ attorneys), this could be significant. `parse_profiles.py` loads HTML files one at a time (fine), but the `records` list (`parse_profiles.py:40`) grows unbounded.
 
@@ -181,7 +181,7 @@ tests/fixtures/               Saved HTML from real scraping runs
 | Component | Test File | Tests | Assessment |
 |-----------|----------|------:|------------|
 | discover | `test_discover.py` | 19 | Good — location parsing, PA extraction |
-| crawl_listings | **None** | 0 | **No tests** — pagination, dedup, sequential iteration untested |
+| crawl_listings | `test_crawl_listings.py` | 8 | Good — atomic writes, checkpoint/resume, force flag |
 | fetch_profiles | **None** | 0 | **No tests** — idempotency, retry-cf, concurrency untested |
 | http_client | **None** | 0 | **No tests** — retry logic, CF detection, semaphore, FetchError untested |
 | listing_parser | `test_listing_parser.py` | 19 | Good — rich + compact cards |
@@ -190,13 +190,13 @@ tests/fixtures/               Saved HTML from real scraping runs
 | parse_profiles | `test_parse_profiles.py` | 5 | Minimal — merge + CF skip only |
 | export | `test_export.py` | 8 | Good — cleaning, CSV output |
 | models | `test_models.py` | 12 | Good — dataclass, tier inference, completeness |
-| cli | `test_cli.py` | 20 | Good — argparse, subcommand dispatch |
+| cli | `test_cli.py` | 22 | Good — argparse, subcommand dispatch, --force flag |
 | **Integration** | **None** | 0 | **No end-to-end pipeline test** |
-| **Total** | 8 files | **148** | |
+| **Total** | 9 files | **162** | |
 
 ### Critical Gaps
 
-1. **`crawl_listings` (0 tests)** — Pagination logic, new-attorney-per-page dedup, sequential PA iteration, and the `all_records` accumulation pattern are completely untested. This is the most complex command module.
+1. ~~**`crawl_listings` (0 tests)**~~ **ADDRESSED** — Checkpoint/resume logic, atomic writes, force flag, and PA skipping are now tested (8 tests). Pagination and dedup logic within a single PA are still untested.
 
 2. **`fetch_profiles` (0 tests)** — Idempotency (skip existing HTML), `--retry-cf` (re-download CF pages), `--force` (re-download all), `asyncio.gather` error handling, and `fetch_status.json` writing are untested.
 
@@ -231,7 +231,7 @@ tests/fixtures/               Saved HTML from real scraping runs
 
 2. ~~**Add proxy rotation support**~~ **DONE** — `config.PROXY_URL` reads from `PROXY_URL` env var; `ScraperClient` passes it to `BrowserConfig(proxy_config=...)` via `ProxyConfig.from_string()`. Bright Data residential proxy rotates IPs server-side through a single endpoint.
 
-3. **Checkpoint crawl-listings** — Write `listings.json` incrementally after each practice area completes. Current behavior: a crash after crawling 99 of 100 PAs loses all progress.
+3. ~~**Checkpoint crawl-listings**~~ **DONE** — `crawl_listings.py` now writes `listings.json` and `crawl_progress.json` incrementally after each practice area completes. Interrupted runs resume from the last completed PA. `--force` flag ignores checkpoint and re-crawls from scratch. Progress file is deleted on successful completion.
 
 ### P1 — Should Fix
 
