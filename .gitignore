@@ -8,3 +8,6 @@ output/
 venv/
 .playwright-mcp/
 spike.py
+.env
+.claude/
+resources/
