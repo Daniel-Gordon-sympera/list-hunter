@@ -100,12 +100,13 @@ tests/fixtures/             — Real HTML saved from scraping runs
 
 ## Rate Limiting & Anti-Detection
 
-- `asyncio.sleep(random.uniform(2.0, 5.0))` between requests
+- `asyncio.sleep(random.uniform(2.0, 5.0))` between requests — sleep runs *before* semaphore acquire for better throughput
 - Max 3 concurrent fetches (`ScraperClient` internal `asyncio.Semaphore(3)`)
 - Exponential backoff via `tenacity` (2s → 4s → 8s, max 3 attempts)
 - Crawl4AI stealth mode: real Chromium browser, `enable_stealth=True`, `override_navigator=True`, `--disable-blink-features=AutomationControlled`
+- `Sec-Fetch-*` and `Accept-Language` headers sent via `BrowserConfig.headers`
 - Persistent browser profile retains Cloudflare clearance cookies across runs
-- Cloudflare challenge detection (3 string markers) with automatic retry
+- Cloudflare challenge detection (7 HTML markers) + response header check (`cf-mitigated`) with automatic retry
 - `--retry-cf` flag to selectively re-download challenge pages
 - Proxy support via `PROXY_URL` env var (e.g. Bright Data residential proxy); rotates IPs server-side
 - No UA rotation, no CAPTCHA solving in v1

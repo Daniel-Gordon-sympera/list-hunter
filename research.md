@@ -88,20 +88,15 @@ tests/fixtures/               Saved HTML from real scraping runs
 
 1. **No proxy rotation** — All requests originate from a single IP. Sustained scraping of 2000+ profiles will trigger IP-level rate limits or bans. `BrowserConfig` supports a `proxy` parameter but it's unused. This is the highest-risk gap for production runs.
 
-2. **No User-Agent rotation** — The scraper relies on Crawl4AI's default Chromium UA. The design doc originally planned a `fake-useragent` pool of 10-15 UAs but this was never implemented (and `fake-useragent` isn't in `requirements.txt`). A single, static UA string across thousands of requests is a fingerprinting signal.
+2. ~~**No User-Agent rotation**~~ — The scraper relies on Crawl4AI's default Chromium UA. The design doc originally planned a `fake-useragent` pool of 10-15 UAs but this was never implemented (and `fake-useragent` isn't in `requirements.txt`). A single, static UA string across thousands of requests is a fingerprinting signal. **PARTIALLY ADDRESSED** — `Sec-Fetch-*` and `Accept-Language` headers now sent via `BrowserConfig.headers`, reducing fingerprint surface. UA rotation remains a P2 item.
 
-3. **No custom request headers** — `spike.py:18-29` defines realistic browser headers including `Sec-Fetch-Dest`, `Sec-Fetch-Mode`, `Sec-Fetch-Site`, `Sec-Fetch-User`, and `Accept-Language`. These headers are not passed to `ScraperClient`. Crawl4AI's `CrawlerRunConfig` supports a `headers` parameter that could carry them.
+3. ~~**No custom request headers**~~ — **FIXED** — `spike.py:18-29` headers (`Sec-Fetch-Dest`, `Sec-Fetch-Mode`, `Sec-Fetch-Site`, `Sec-Fetch-User`, `Accept-Language`) are now ported to `_BROWSER_HEADERS` in `http_client.py` and passed via `BrowserConfig(headers=...)`.
 
 4. **No CAPTCHA solving** — If Cloudflare escalates to Turnstile or hCaptcha enforcement, the scraper has no mechanism to solve challenges. Would require integration with 2captcha, CapSolver, or similar services.
 
 5. **TLS fingerprint reliance** — Playwright's bundled Chromium has a known JA3 hash. Sophisticated WAFs (not just Cloudflare — also Akamai, DataDome) can flag this specific fingerprint. Mitigations: `playwright-extra` with stealth plugin, or `camoufox` for Firefox-based fingerprint diversity.
 
-6. **CF challenge markers are fragile** — Only 3 string markers are checked (`http_client.py:36-40`):
-   - `<title>Just a moment...</title>`
-   - `challenge-platform`
-   - `Verifying you are human`
-
-   Cloudflare frequently changes challenge page HTML. Should add response header analysis (`cf-mitigated`, `cf-chl-bypass` headers) and check for the `cf_clearance` cookie as a positive success signal.
+6. ~~**CF challenge markers are fragile**~~ — **FIXED** — Expanded from 3 to 7 HTML markers (`cf-turnstile`, `cf-chl-opt`, `Attention Required!`, `cf_clearance` added). New `is_cloudflare_challenge_response()` function also checks `cf-mitigated` response header. `_single_fetch()` passes response headers to the new detection function.
 
 7. **No cookie jar inspection** — The persistent browser profile stores cookies, but there's no validation that the `cf_clearance` cookie was actually set after passing a challenge. This cookie is the real success signal for CF bypass — its absence means the challenge wasn't solved.
 
@@ -123,7 +118,7 @@ tests/fixtures/               Saved HTML from real scraping runs
 
 1. **Listing crawl is fully sequential** — `crawl_listings.py` iterates practice areas one by one with `await client.fetch()`. With 100+ PAs and 5-20 pages each, this phase dominates total runtime. At an average of 3.5s delay per page, 100 PAs with 10 pages each = 100 * 10 * 3.5s = **~58 minutes** just for listing crawl. Could parallelize across PAs with a semaphore (e.g., 2-3 concurrent PA crawls).
 
-2. **Semaphore holds during sleep** — In `http_client.py:117-121`, the random delay runs *inside* `async with self._semaphore`. This means a concurrency slot is occupied during the 2-5s sleep, not just during the actual browser navigation (~2-5s). Effective throughput is halved because each slot spends ~50% of its time sleeping. The delay should be moved *before* the semaphore acquire, or the semaphore should only gate the browser call.
+2. ~~**Semaphore holds during sleep**~~ **FIXED** — `asyncio.sleep()` moved before `async with self._semaphore` in `http_client.fetch()`. Concurrency slots are now only held during actual browser navigation, roughly doubling effective throughput.
 
 3. ~~**Double semaphore**~~ **FIXED** — `fetch_profiles._fetch_one()` previously acquired its own `semaphore` parameter, then called `client.fetch()` which acquires `ScraperClient._semaphore`. The redundant outer semaphore has been removed; concurrency is now managed solely by `ScraperClient`'s internal semaphore.
 
@@ -137,7 +132,7 @@ tests/fixtures/               Saved HTML from real scraping runs
 
 | Priority | Change | Impact | Effort |
 |----------|--------|--------|--------|
-| Short-term | Move `asyncio.sleep()` before semaphore acquire in `fetch()` | ~2x throughput | Low |
+| ~~Short-term~~ | ~~Move `asyncio.sleep()` before semaphore acquire in `fetch()`~~ | ~~~2x throughput~~ | **DONE** |
 | ~~Short-term~~ | ~~Remove outer semaphore in `_fetch_one`, use only `ScraperClient`'s~~ | ~~Clarity, avoid bugs~~ | **DONE** |
 | Short-term | Add inter-PA parallelism to `crawl_listings.py` (2-3 concurrent PAs) | ~2-3x faster listing phase | Medium |
 | Medium-term | Support `--workers N` to spawn N browser contexts for profile fetching | Linear throughput scaling | Medium |
@@ -182,8 +177,8 @@ tests/fixtures/               Saved HTML from real scraping runs
 |-----------|----------|------:|------------|
 | discover | `test_discover.py` | 19 | Good — location parsing, PA extraction |
 | crawl_listings | `test_crawl_listings.py` | 8 | Good — atomic writes, checkpoint/resume, force flag |
-| fetch_profiles | **None** | 0 | **No tests** — idempotency, retry-cf, concurrency untested |
-| http_client | **None** | 0 | **No tests** — retry logic, CF detection, semaphore, FetchError untested |
+| fetch_profiles | `test_fetch_profiles.py` | 8 | Good — idempotency, force, retry-cf, status tracking, error handling |
+| http_client | `test_http_client.py` | 15 | Good — proxy, CF detection (markers + headers), fetch flow, retry, semaphore ordering, lifecycle |
 | listing_parser | `test_listing_parser.py` | 19 | Good — rich + compact cards |
 | profile_parser | `test_profile_parser.py` | 59 | Excellent — all 33 fields, multiple tiers |
 | address_parser | `test_address_parser.py` | 6 | Adequate |
@@ -192,15 +187,15 @@ tests/fixtures/               Saved HTML from real scraping runs
 | models | `test_models.py` | 12 | Good — dataclass, tier inference, completeness |
 | cli | `test_cli.py` | 22 | Good — argparse, subcommand dispatch, --force flag |
 | **Integration** | **None** | 0 | **No end-to-end pipeline test** |
-| **Total** | 9 files | **162** | |
+| **Total** | 11 files | **185** | |
 
 ### Critical Gaps
 
 1. ~~**`crawl_listings` (0 tests)**~~ **ADDRESSED** — Checkpoint/resume logic, atomic writes, force flag, and PA skipping are now tested (8 tests). Pagination and dedup logic within a single PA are still untested.
 
-2. **`fetch_profiles` (0 tests)** — Idempotency (skip existing HTML), `--retry-cf` (re-download CF pages), `--force` (re-download all), `asyncio.gather` error handling, and `fetch_status.json` writing are untested.
+2. ~~**`fetch_profiles` (0 tests)**~~ **ADDRESSED** — 8 tests cover idempotency (skip existing HTML), `--force` (re-download all), `--retry-cf` (re-download CF pages), successful/failed fetch, `fetch_status.json` writing, empty listings, and `asyncio.gather` exception handling.
 
-3. **`http_client` (0 tests)** — `ScraperClient`, `FetchError`, `is_cloudflare_challenge()`, retry logic, semaphore behavior, and the `_single_fetch` → `_fetch_with_retry` → `fetch` chain are untested. This is the reliability backbone of the scraper.
+3. ~~**`http_client` (0 tests)**~~ **ADDRESSED** — 15 tests cover proxy config, CF detection (all 7 markers + response headers), fetch success/404/retry-exhausted/CF-challenge flows, `FetchError` with status_code, sleep-before-semaphore ordering, and context manager lifecycle.
 
 4. **No integration test** — No test chains even two phases together. A minimal integration test using mocked HTML fixtures would catch interface mismatches between phases.
 
@@ -235,13 +230,13 @@ tests/fixtures/               Saved HTML from real scraping runs
 
 ### P1 — Should Fix
 
-4. **Port spike.py headers to ScraperClient** — Pass `Sec-Fetch-Dest`, `Sec-Fetch-Mode`, `Sec-Fetch-Site`, `Sec-Fetch-User`, and `Accept-Language` headers via Crawl4AI's `headers` parameter in `CrawlerRunConfig`.
+4. ~~**Port spike.py headers to ScraperClient**~~ **DONE** — `_BROWSER_HEADERS` dict (`Sec-Fetch-Dest`, `Sec-Fetch-Mode`, `Sec-Fetch-Site`, `Sec-Fetch-User`, `Accept-Language`) added to `http_client.py` and passed via `BrowserConfig(headers=...)`.
 
-5. **Add tests for crawl_listings, fetch_profiles, and http_client** — These are the three most critical untested modules. Use mocked Crawl4AI responses and saved HTML fixtures.
+5. ~~**Add tests for crawl_listings, fetch_profiles, and http_client**~~ **DONE** — `test_http_client.py` expanded from 5 to ~15 tests. New `test_fetch_profiles.py` with ~8 tests. `test_crawl_listings.py` already had 8 tests.
 
-6. **Move sleep outside semaphore** — In `http_client.fetch()`, move `asyncio.sleep()` before `async with self._semaphore`. This lets the delay run without occupying a concurrency slot, roughly doubling effective throughput.
+6. ~~**Move sleep outside semaphore**~~ **DONE** — `asyncio.sleep()` moved before `async with self._semaphore` in `http_client.fetch()`. Concurrency slots only held during browser navigation.
 
-7. **Improve CF detection** — Add response header checks (`cf-mitigated`, `cf-chl-bypass`). Validate that `cf_clearance` cookie exists in the browser profile after successful navigation. Expand string markers beyond the current 3.
+7. ~~**Improve CF detection**~~ **DONE** — Expanded to 7 HTML markers. New `is_cloudflare_challenge_response()` checks `cf-mitigated` response header. `_single_fetch()` passes `result.response_headers` to the new function.
 
 ### P2 — Nice to Have
 

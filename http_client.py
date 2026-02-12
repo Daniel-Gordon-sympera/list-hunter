@@ -38,12 +38,37 @@ _CLOUDFLARE_MARKERS = (
     "<title>Just a moment...</title>",
     "challenge-platform",
     "Verifying you are human",
+    "cf-turnstile",
+    "cf-chl-opt",
+    "Attention Required!",
+    "cf_clearance",
 )
+
+_BROWSER_HEADERS = {
+    "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+}
 
 
 def is_cloudflare_challenge(html: str) -> bool:
     """Return True if *html* looks like a Cloudflare challenge page."""
     return any(marker in html for marker in _CLOUDFLARE_MARKERS)
+
+
+def is_cloudflare_challenge_response(
+    html: str, response_headers: dict | None = None
+) -> bool:
+    """Check both HTML markers and response headers for CF challenge signals."""
+    if any(marker in html for marker in _CLOUDFLARE_MARKERS):
+        return True
+    if response_headers:
+        cf_mitigated = response_headers.get("cf-mitigated", "")
+        if "challenge" in cf_mitigated.lower():
+            return True
+    return False
 
 
 class FetchError(Exception):
@@ -79,6 +104,7 @@ class ScraperClient:
             use_persistent_context=True,
             user_data_dir=os.path.abspath(config.BROWSER_PROFILE_DIR),
             extra_args=["--disable-blink-features=AutomationControlled"],
+            headers=_BROWSER_HEADERS,
             proxy_config=proxy_config,
         )
         self._run_config = CrawlerRunConfig(
@@ -123,15 +149,15 @@ class ScraperClient:
             The raw HTML string on success, or None if the page was not found
             or all retries were exhausted.
         """
-        async with self._semaphore:
-            # Rate-limit: random sleep before each request
-            delay = random.uniform(config.DELAY_MIN, config.DELAY_MAX)
-            logger.debug("Sleeping %.1fs before request to %s", delay, url)
-            await asyncio.sleep(delay)
+        # Rate-limit: random sleep before acquiring a concurrency slot
+        delay = random.uniform(config.DELAY_MIN, config.DELAY_MAX)
+        logger.debug("Sleeping %.1fs before request to %s", delay, url)
+        await asyncio.sleep(delay)
 
+        async with self._semaphore:
             try:
                 return await self._fetch_with_retry(url, referer=referer)
-            except RetryError as exc:
+            except (RetryError, FetchError) as exc:
                 logger.error(
                     "All %d retries exhausted for %s: %s",
                     config.MAX_RETRIES,
@@ -192,7 +218,9 @@ class ScraperClient:
 
         # Success — but reject Cloudflare challenge pages
         if result.success and result.html:
-            if is_cloudflare_challenge(result.html):
+            if is_cloudflare_challenge_response(
+                result.html, getattr(result, "response_headers", None)
+            ):
                 logger.warning("Cloudflare challenge detected for %s", url)
                 raise FetchError("Cloudflare challenge detected")
             logger.debug(

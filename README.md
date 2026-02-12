@@ -49,6 +49,12 @@ python cli.py parse-profiles data/los-angeles_ca/
 python cli.py export data/los-angeles_ca/records.json
 ```
 
+## Anti-Detection
+
+- Stealth browser headers (`Sec-Fetch-*`, `Accept-Language`) sent with every request
+- Cloudflare challenge detection (7 HTML markers + `cf-mitigated` response header) with automatic retry
+- Use `--retry-cf` on `fetch-profiles` to selectively re-download blocked pages
+
 ## Running tests
 
 ```bash
