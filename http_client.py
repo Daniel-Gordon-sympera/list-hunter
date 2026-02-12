@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 from typing import Optional
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+from crawl4ai.async_configs import ProxyConfig
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -31,6 +33,17 @@ from tenacity import (
 import config
 
 logger = logging.getLogger(__name__)
+
+_CLOUDFLARE_MARKERS = (
+    "<title>Just a moment...</title>",
+    "challenge-platform",
+    "Verifying you are human",
+)
+
+
+def is_cloudflare_challenge(html: str) -> bool:
+    """Return True if *html* looks like a Cloudflare challenge page."""
+    return any(marker in html for marker in _CLOUDFLARE_MARKERS)
 
 
 class FetchError(Exception):
@@ -52,19 +65,36 @@ class ScraperClient:
     def __init__(self) -> None:
         self._crawler: AsyncWebCrawler | None = None
         self._semaphore = asyncio.Semaphore(config.MAX_CONCURRENT)
+
+        os.makedirs(config.BROWSER_PROFILE_DIR, exist_ok=True)
+
+        proxy_config = None
+        if config.PROXY_URL:
+            proxy_config = ProxyConfig.from_string(config.PROXY_URL)
+
         self._browser_config = BrowserConfig(
             headless=True,
             verbose=False,
+            enable_stealth=True,
+            use_persistent_context=True,
+            user_data_dir=os.path.abspath(config.BROWSER_PROFILE_DIR),
+            extra_args=["--disable-blink-features=AutomationControlled"],
+            proxy_config=proxy_config,
         )
         self._run_config = CrawlerRunConfig(
             cache_mode=CacheMode.DISABLED,
             page_timeout=config.REQUEST_TIMEOUT * 1000,  # ms
+            delay_before_return_html=config.DELAY_BEFORE_RETURN,
+            override_navigator=True,
         )
 
     async def __aenter__(self) -> ScraperClient:
         self._crawler = AsyncWebCrawler(config=self._browser_config)
         await self._crawler.__aenter__()
-        logger.info("Browser started (headless)")
+        if config.PROXY_URL:
+            logger.info("Browser started (headless, proxy enabled)")
+        else:
+            logger.info("Browser started (headless, no proxy)")
         return self
 
     async def __aexit__(
@@ -160,8 +190,11 @@ class ScraperClient:
             logger.warning("404 Not Found: %s", url)
             return None
 
-        # Success
+        # Success — but reject Cloudflare challenge pages
         if result.success and result.html:
+            if is_cloudflare_challenge(result.html):
+                logger.warning("Cloudflare challenge detected for %s", url)
+                raise FetchError("Cloudflare challenge detected")
             logger.debug(
                 "Fetched %s: %d chars", url, len(result.html)
             )

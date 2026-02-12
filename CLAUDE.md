@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Status
 
-Pre-implementation. The approved design is at `docs/plans/2026-02-10-superlawyers-scraper-design.md`. The original specification is `superlawyers_scraping_plan.md` (v2.0) — use the design doc as the source of truth where they differ.
+Implementation in progress. All five pipeline phases are functional. The implementation pivoted from raw `httpx` to **Crawl4AI** (Playwright-based browser automation) to handle Cloudflare protection on superlawyers.com. The approved design is at `docs/plans/2026-02-10-superlawyers-scraper-design.md` — note that it still references `httpx`; the code is the source of truth for HTTP layer details. The original specification is `superlawyers_scraping_plan.md` (v2.0).
 
 ## What This Project Does
 
@@ -13,8 +13,9 @@ A Python async web scraper for the Super Lawyers attorney directory. Accepts a c
 ## Tech Stack
 
 - Python 3.11+
-- `httpx` (async HTTP), `beautifulsoup4` + `lxml` (parsing)
-- `tenacity` (retries), `fake-useragent` (UA rotation), `python-slugify` (URL slugs)
+- `crawl4ai` (Playwright-based browser automation for HTTP — bypasses Cloudflare)
+- `beautifulsoup4` + `lxml` (HTML parsing)
+- `tenacity` (retries with exponential backoff), `python-slugify` (URL slugs)
 - Testing: `pytest` with saved HTML fixtures for offline parser tests
 
 ## Commands
@@ -53,9 +54,12 @@ export           → output/*.csv           (cleaned, UTF-8 BOM, QUOTE_ALL)
 ## Project Structure
 
 ```
-cli.py                      — CLI entry point (argparse)
+cli.py                      — CLI entry point (argparse, 5 subcommands)
+main.py                     — Full pipeline runner (chains all 5 phases for a single location)
 config.py                   — Constants (URLs, delays, concurrency limits)
 models.py                   — AttorneyRecord dataclass (33 fields, 7 groups)
+http_client.py              — Crawl4AI wrapper (stealth browser, semaphore, retry, CF detection)
+spike.py                    — Validation spike (throwaway — fixture generation)
 commands/
   discover.py               — Phase 1+2: resolve location, list practice areas
   crawl_listings.py         — Phase 3: paginate listings, pre-fill 7 fields, UUID dedup
@@ -66,7 +70,7 @@ parsers/
   listing_parser.py         — Listing card HTML → partial AttorneyRecord
   profile_parser.py         — Profile page HTML → full AttorneyRecord
   address_parser.py         — Address block → street/city/state/zip
-http_client.py              — Thin httpx wrapper (headers, delays, retries)
+resources/                  — Reference docs (crawl4ai, LLM API docs)
 tests/fixtures/             — Real HTML saved from scraping runs
 ```
 
@@ -88,13 +92,17 @@ tests/fixtures/             — Real HTML saved from scraping runs
 
 **Multi-value field encoding**: `" ; "` (space-semicolon-space) delimiter. Internal semicolons replaced with commas.
 
-## Rate Limiting
+## Rate Limiting & Anti-Detection
 
-- `asyncio.sleep(random.uniform(1.0, 3.0))` between requests
-- Max 5 concurrent profile fetches (`asyncio.Semaphore(5)`)
-- Exponential backoff on 429/5xx via `tenacity`
-- Realistic browser headers with Referer chain
-- No session rotation, no token bucket, no checkpoint system in v1
+- `asyncio.sleep(random.uniform(2.0, 5.0))` between requests
+- Max 3 concurrent fetches (`ScraperClient` internal `asyncio.Semaphore(3)`)
+- Exponential backoff via `tenacity` (2s → 4s → 8s, max 3 attempts)
+- Crawl4AI stealth mode: real Chromium browser, `enable_stealth=True`, `override_navigator=True`, `--disable-blink-features=AutomationControlled`
+- Persistent browser profile retains Cloudflare clearance cookies across runs
+- Cloudflare challenge detection (3 string markers) with automatic retry
+- `--retry-cf` flag to selectively re-download challenge pages
+- Proxy support via `PROXY_URL` env var (e.g. Bright Data residential proxy); rotates IPs server-side
+- No UA rotation, no CAPTCHA solving in v1
 
 ## URL Patterns
 
