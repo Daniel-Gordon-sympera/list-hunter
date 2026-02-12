@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from models import AttorneyRecord
 from parsers.profile_parser import parse_profile
+from http_client import is_cloudflare_challenge
 
 log = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ def run(data_dir: str) -> str:
     listings_path = os.path.join(data_dir, "listings.json")
 
     # Load listing pre-fill data
-    with open(listings_path) as f:
+    with open(listings_path, encoding="utf-8") as f:
         listings = json.load(f)
 
     # Find all HTML files
@@ -50,6 +51,17 @@ def run(data_dir: str) -> str:
             k: v for k, v in listing_data.items()
             if k in {f.name for f in fields(AttorneyRecord)}
         })
+
+        # Skip Cloudflare challenge pages — use listing data only
+        if is_cloudflare_challenge(html):
+            log.warning("Skipping Cloudflare challenge HTML for %s", uuid)
+            merged = listing_record
+            merged.scraped_at = datetime.now(timezone.utc).isoformat()
+            merged.profile_tier = merged.infer_profile_tier()
+            records.append(merged)
+            if (i + 1) % 100 == 0:
+                log.info(f"  Parsed {i + 1}/{len(html_files)}")
+            continue
 
         # Parse profile
         profile_url = listing_data.get("profile_url", "")

@@ -107,10 +107,12 @@ class TestSubcommandWiring:
         mock_run = AsyncMock(return_value="/data/html")
         args = MagicMock()
         args.input = "/data/listings.json"
+        args.force = False
+        args.retry_cf = False
 
         with patch("commands.fetch_profiles.run", mock_run):
             cmd_fetch_profiles(args)
-            mock_run.assert_awaited_once_with("/data/listings.json")
+            mock_run.assert_awaited_once_with("/data/listings.json", force=False, retry_cf=False)
 
     def test_cmd_parse_profiles_calls_parse_run(self):
         mock_run = MagicMock(return_value="/data/records.json")

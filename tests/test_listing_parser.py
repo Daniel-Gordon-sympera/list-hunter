@@ -135,6 +135,110 @@ def test_poap_record_specific_values():
     assert navid.selection_type == ""
 
 
+def test_compact_basic_card_parsing():
+    """Compact 'basic' cards should extract firm_name and selection_type."""
+    html = '''<html><body>
+    <div class="card serp-container basic lawyer">
+      <h2 class="full-name fw-bold mb-0">
+        <a class="directory_profile"
+           href="https://profiles.superlawyers.com/new-york/new-york/lawyer/test/11111111-2222-3333-4444-555555555555.html"
+           aria-label="View profile of John Test">John Test</a>
+      </h2>
+      <span class="d-block fw-bold text-secondary mt-1">
+        Acme Legal LLP | <span class="city">New York, NY</span>
+      </span>
+      <span class="selected_to d-block"> Rising Stars </span>
+    </div>
+    </body></html>'''
+    records = parse_listing_page(html)
+    assert len(records) == 1
+    r = records[0]
+    assert r.name == "John Test"
+    assert r.firm_name == "Acme Legal LLP"
+    assert r.selection_type == "Rising Stars"
+    assert r.phone == ""
+    assert r.description == ""
+
+
+def test_compact_card_super_lawyers_selection():
+    """Compact card with 'Super Lawyers' selection type."""
+    html = '''<html><body>
+    <div class="card serp-container basic lawyer">
+      <h2 class="full-name fw-bold mb-0">
+        <a class="directory_profile"
+           href="https://profiles.superlawyers.com/new-york/new-york/lawyer/jane/22222222-3333-4444-5555-666666666666.html"
+           aria-label="View profile of Jane Doe">Jane Doe</a>
+      </h2>
+      <span class="d-block fw-bold text-secondary mt-1">
+        Smith &amp; Partners | <span class="city">New York, NY</span>
+      </span>
+      <span class="selected_to d-block"> Super Lawyers </span>
+    </div>
+    </body></html>'''
+    records = parse_listing_page(html)
+    assert len(records) == 1
+    assert records[0].firm_name == "Smith & Partners"
+    assert records[0].selection_type == "Super Lawyers"
+
+
+def test_compact_card_serving_city_variant():
+    """Compact card with 'Serving' prefix in city span."""
+    html = '''<html><body>
+    <div class="card serp-container basic lawyer">
+      <h2 class="full-name fw-bold mb-0">
+        <a class="directory_profile"
+           href="https://profiles.superlawyers.com/new-york/new-york/lawyer/bob/33333333-4444-5555-6666-777777777777.html">Bob Smith</a>
+      </h2>
+      <span class="d-block fw-bold text-secondary mt-1">
+        Brooklyn Law Firm | <span class="city">Serving New York, NY (Brooklyn, NY)</span>
+      </span>
+      <span class="selected_to d-block"> Super Lawyers </span>
+    </div>
+    </body></html>'''
+    records = parse_listing_page(html)
+    assert len(records) == 1
+    assert records[0].firm_name == "Brooklyn Law Firm"
+
+
+def test_mixed_rich_and_compact_cards():
+    """Mix of rich (a.single-link) and compact cards should all parse."""
+    html = '''<html><body>
+    <div class="card serp-container top_spot lawyer">
+      <h2 class="full-name fw-bold mb-0">
+        <a href="https://profiles.superlawyers.com/ca/la/lawyer/rich/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.html">Rich Card</a>
+      </h2>
+      <a class="single-link" href="/firm">Big Firm LLC</a>
+      <a href="tel:+12125551234">212-555-1234</a>
+      <p class="ts_tagline">Expert attorney</p>
+      <i class="icon-ribbon" aria-label="Sponsored Super Lawyers selectee"></i>
+    </div>
+    <div class="card serp-container basic lawyer">
+      <h2 class="full-name fw-bold mb-0">
+        <a class="directory_profile"
+           href="https://profiles.superlawyers.com/ny/ny/lawyer/compact/ffffffff-1111-2222-3333-444444444444.html">Compact Card</a>
+      </h2>
+      <span class="d-block fw-bold text-secondary mt-1">
+        Small Firm PC | <span class="city">New York, NY</span>
+      </span>
+      <span class="selected_to d-block"> Rising Stars </span>
+    </div>
+    </body></html>'''
+    records = parse_listing_page(html)
+    assert len(records) == 2
+    rich = records[0]
+    assert rich.name == "Rich Card"
+    assert rich.firm_name == "Big Firm LLC"
+    assert rich.phone == "2125551234"
+    assert rich.description == "Expert attorney"
+    assert rich.selection_type == "Super Lawyers"
+    compact = records[1]
+    assert compact.name == "Compact Card"
+    assert compact.firm_name == "Small Firm PC"
+    assert compact.phone == ""
+    assert compact.description == ""
+    assert compact.selection_type == "Rising Stars"
+
+
 def test_empty_html_returns_empty():
     records = parse_listing_page("<html><body></body></html>")
     assert records == []

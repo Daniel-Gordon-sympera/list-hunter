@@ -83,9 +83,6 @@ class _ProfileParser:
 
     def _extract_name(self) -> str:
         h1 = self.soup.select_one("h1#attorney_name")
-        if h1:
-            return h1.get_text(strip=True)
-        h1 = self.soup.select_one("h1")
         return h1.get_text(strip=True) if h1 else ""
 
     def _extract_description(self) -> str:

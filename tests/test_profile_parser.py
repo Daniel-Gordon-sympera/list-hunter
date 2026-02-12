@@ -4,6 +4,7 @@
 import os
 import pytest
 from parsers.profile_parser import parse_profile
+from http_client import is_cloudflare_challenge
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
@@ -211,7 +212,7 @@ class TestSafeExtraction:
     """Tests for robustness of the parser against malformed content."""
 
     def test_survives_malformed_html(self):
-        html = "<html><body><h1>Test Name</h1><div>broken<</div></body></html>"
+        html = '<html><body><h1 id="attorney_name">Test Name</h1><div>broken<</div></body></html>'
         record = parse_profile(
             html,
             "https://example.com/x/11111111-2222-3333-4444-555555555555.html",
@@ -220,7 +221,7 @@ class TestSafeExtraction:
         assert record.uuid == "11111111-2222-3333-4444-555555555555"
 
     def test_h1_with_extra_whitespace(self):
-        html = "<html><body><h1>  Jane   Doe  </h1></body></html>"
+        html = '<html><body><h1 id="attorney_name">  Jane   Doe  </h1></body></html>'
         record = parse_profile(
             html,
             "https://example.com/x/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.html",
@@ -291,3 +292,58 @@ class TestSafeExtraction:
             "https://example.com/x/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.html",
         )
         assert record.practice_areas == "Criminal Defense, Family Law"
+
+
+CLOUDFLARE_CHALLENGE_HTML = """
+<html>
+<head><title>Just a moment...</title></head>
+<body>
+<h1 class="zone-name-title h1">profiles.superlawyers.com</h1>
+<div id="challenge-platform">
+<p>Verifying you are human. This may take a few seconds.</p>
+</div>
+</body>
+</html>
+"""
+
+
+class TestCloudflareDetection:
+    """Tests for Cloudflare challenge page detection and handling."""
+
+    def test_cloudflare_challenge_detected_by_title(self):
+        html = "<html><head><title>Just a moment...</title></head><body></body></html>"
+        assert is_cloudflare_challenge(html) is True
+
+    def test_cloudflare_challenge_detected_by_platform(self):
+        html = '<html><body><div id="challenge-platform"></div></body></html>'
+        assert is_cloudflare_challenge(html) is True
+
+    def test_cloudflare_challenge_detected_by_verifying(self):
+        html = "<html><body><p>Verifying you are human</p></body></html>"
+        assert is_cloudflare_challenge(html) is True
+
+    def test_normal_profile_not_flagged(self):
+        html = _load_fixture("profile_premium.html")
+        assert is_cloudflare_challenge(html) is False
+
+    def test_empty_html_not_flagged(self):
+        assert is_cloudflare_challenge("<html><body></body></html>") is False
+
+    def test_cloudflare_page_returns_empty_name(self):
+        """After removing the generic h1 fallback, a Cloudflare challenge page
+        must NOT extract 'profiles.superlawyers.com' as the attorney name."""
+        record = parse_profile(
+            CLOUDFLARE_CHALLENGE_HTML,
+            "https://profiles.superlawyers.com/new-york/new-york/lawyer/john-doe/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.html",
+        )
+        assert record.name == ""
+        assert record.name != "profiles.superlawyers.com"
+
+    def test_generic_h1_no_longer_used_for_name(self):
+        """A bare <h1> (without id='attorney_name') should not be picked up."""
+        html = '<html><body><h1>Some Random Heading</h1></body></html>'
+        record = parse_profile(
+            html,
+            "https://example.com/x/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.html",
+        )
+        assert record.name == ""

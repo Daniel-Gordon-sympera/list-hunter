@@ -54,6 +54,16 @@ def parse_listing_page(html: str) -> list[AttorneyRecord]:
         firm_el = card.select_one("a.single-link")
         if firm_el:
             record.firm_name = firm_el.get_text(strip=True)
+        else:
+            # Compact card: firm in span before "|" pipe and <span class="city">
+            info_span = card.select_one("span.fw-bold.text-secondary")
+            if info_span:
+                for child in info_span.children:
+                    if isinstance(child, str):
+                        firm_text = child.strip().rstrip("|").strip()
+                        if firm_text:
+                            record.firm_name = firm_text
+                        break
 
         # Phone: extract from tel: link
         phone_el = card.select_one('a[href^="tel:"]')
@@ -74,6 +84,15 @@ def parse_listing_page(html: str) -> list[AttorneyRecord]:
                 record.selection_type = "Rising Stars"
             elif "Super Lawyers" in aria_label:
                 record.selection_type = "Super Lawyers"
+        else:
+            # Compact card: <span class="selected_to">
+            selected_to = card.select_one("span.selected_to")
+            if selected_to:
+                text = selected_to.get_text(strip=True)
+                if "Rising Stars" in text:
+                    record.selection_type = "Rising Stars"
+                elif "Super Lawyers" in text:
+                    record.selection_type = "Super Lawyers"
 
         records.append(record)
 

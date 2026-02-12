@@ -11,9 +11,11 @@ Accepts a city/state location and produces a CSV with 33 data fields per attorne
 ### Install
 
 ```bash
+# For Windows PowerShell
 python -m venv .venv
-source .venv/bin/activate  # or .venv\Scripts\activate on Windows
+.venv\Scripts\activate 
 pip install -r requirements.txt
+playwright install 
 ```
 
 ### Scrape a city (full pipeline)

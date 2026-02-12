@@ -5,7 +5,7 @@ Reads listings.json (output of crawl-listings), fetches each attorney's
 profile page, and saves the raw HTML to {data_dir}/html/{uuid}.html.
 
 Idempotent: skips UUIDs whose HTML file already exists on disk.
-Concurrency is capped by asyncio.Semaphore(config.MAX_CONCURRENT).
+Concurrency is capped by ScraperClient's internal semaphore.
 """
 
 from __future__ import annotations
@@ -16,14 +16,13 @@ import logging
 import os
 
 import config
-from http_client import ScraperClient
+from http_client import ScraperClient, is_cloudflare_challenge
 
 log = logging.getLogger(__name__)
 
 
 async def _fetch_one(
     client: ScraperClient,
-    semaphore: asyncio.Semaphore,
     uuid: str,
     record: dict,
     html_dir: str,
@@ -41,8 +40,7 @@ async def _fetch_one(
 
     log.info("[%d/%d] Fetching: %s", index, total, name)
 
-    async with semaphore:
-        html = await client.fetch(profile_url, referer=config.BASE_URL)
+    html = await client.fetch(profile_url, referer=config.BASE_URL)
 
     if html:
         with open(html_path, "w", encoding="utf-8") as f:
@@ -53,11 +51,13 @@ async def _fetch_one(
     return uuid, "failed"
 
 
-async def run(listings_path: str) -> str:
+async def run(listings_path: str, *, force: bool = False, retry_cf: bool = False) -> str:
     """Fetch profile HTML for every attorney in listings.json.
 
     Args:
         listings_path: Path to listings.json (dict of {uuid: record_dict}).
+        force: If True, re-download HTML even if the file already exists on disk.
+        retry_cf: If True, re-download HTML files that are Cloudflare challenge pages.
 
     Returns:
         Path to the data directory containing html/ and fetch_status.json.
@@ -75,7 +75,13 @@ async def run(listings_path: str) -> str:
 
     for uuid, record in listings.items():
         html_path = os.path.join(html_dir, f"{uuid}.html")
-        if os.path.exists(html_path):
+        if not force and os.path.exists(html_path):
+            if retry_cf:
+                with open(html_path, encoding="utf-8", errors="replace") as hf:
+                    head = hf.read(500)
+                if is_cloudflare_challenge(head):
+                    to_fetch[uuid] = record
+                    continue
             statuses[uuid] = "skipped"
         else:
             to_fetch[uuid] = record
@@ -87,13 +93,10 @@ async def run(listings_path: str) -> str:
     )
 
     if to_fetch:
-        semaphore = asyncio.Semaphore(config.MAX_CONCURRENT)
-
         async with ScraperClient() as client:
             tasks = [
                 _fetch_one(
                     client,
-                    semaphore,
                     uuid,
                     record,
                     html_dir,

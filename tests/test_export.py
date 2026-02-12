@@ -62,7 +62,7 @@ def test_export_produces_csv(tmp_path):
         AttorneyRecord(uuid="test-1", name="Test Attorney", city="LA", state="CA").to_dict()
     ]
     records_path = tmp_path / "records.json"
-    with open(records_path, "w") as f:
+    with open(records_path, "w", encoding="utf-8") as f:
         json.dump(records_data, f)
 
     output_dir = tmp_path / "output"

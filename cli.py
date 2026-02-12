@@ -66,7 +66,7 @@ def cmd_fetch_profiles(args: argparse.Namespace) -> None:
     """Run the fetch-profiles phase: download raw profile HTML."""
     from commands import fetch_profiles
 
-    result = asyncio.run(fetch_profiles.run(args.input))
+    result = asyncio.run(fetch_profiles.run(args.input, force=args.force, retry_cf=args.retry_cf))
     print(f"Output: {result}")
 
 
@@ -137,6 +137,18 @@ def main() -> None:
     sp_fetch.add_argument(
         "input",
         help="Path to listings.json from the crawl-listings step",
+    )
+    sp_fetch.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Re-download HTML even if files already exist on disk",
+    )
+    sp_fetch.add_argument(
+        "--retry-cf",
+        action="store_true",
+        default=False,
+        help="Re-download only HTML files that are Cloudflare challenge pages",
     )
     sp_fetch.set_defaults(func=cmd_fetch_profiles)
 
