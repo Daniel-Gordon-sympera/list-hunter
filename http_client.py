@@ -95,7 +95,14 @@ class ScraperClient:
 
         proxy_config = None
         if config.PROXY_URL:
-            proxy_config = ProxyConfig.from_string(config.PROXY_URL)
+            proxy_server = f"{config.PROXY_SERVER}:{config.PROXY_PORT}"
+            proxy_username = config.PROXY_USERNAME
+            proxy_password = config.PROXY_PASSWORD
+            proxy_config = ProxyConfig(
+                server=proxy_server,
+                username=proxy_username,
+                password=proxy_password,
+            )
 
         self._browser_config = BrowserConfig(
             headless=True,

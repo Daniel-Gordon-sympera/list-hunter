@@ -5,6 +5,10 @@ import os
 
 # Proxy (set PROXY_URL env var to enable, e.g. "http://user:pass@host:port")
 PROXY_URL = os.environ.get("PROXY_URL")
+PROXY_SERVER = os.environ.get("PROXY_SERVER")
+PROXY_PORT = os.environ.get("PROXY_PORT")
+PROXY_USERNAME = os.environ.get("PROXY_USERNAME")
+PROXY_PASSWORD = os.environ.get("PROXY_PASSWORD")
 
 # URLs
 BASE_URL = "https://attorneys.superlawyers.com"
@@ -33,4 +37,4 @@ BROWSER_PROFILE_DIR = "./data/.browser_profile"
 DELAY_BEFORE_RETURN = 2.0     # seconds, let JS challenges resolve
 
 # Timeouts
-REQUEST_TIMEOUT = 30           # seconds
+REQUEST_TIMEOUT = 60           # seconds
