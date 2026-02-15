@@ -28,8 +28,12 @@ async def _fetch_one(
     html_dir: str,
     index: int,
     total: int,
+    on_complete=None,
 ) -> tuple[str, str]:
     """Fetch a single profile and save its HTML to disk.
+
+    Args:
+        on_complete: Optional callback invoked after each fetch completes.
 
     Returns:
         A (uuid, status) tuple where status is "success" or "failed".
@@ -45,9 +49,13 @@ async def _fetch_one(
     if html:
         with open(html_path, "w", encoding="utf-8") as f:
             f.write(html)
+        if on_complete:
+            on_complete()
         return uuid, "success"
 
     log.warning("Failed to fetch profile for %s (%s)", name, uuid)
+    if on_complete:
+        on_complete()
     return uuid, "failed"
 
 
@@ -93,19 +101,34 @@ async def run(listings_path: str, *, force: bool = False, retry_cf: bool = False
     )
 
     if to_fetch:
-        async with ScraperClient() as client:
-            tasks = [
-                _fetch_one(
-                    client,
-                    uuid,
-                    record,
-                    html_dir,
-                    index=i + 1,
-                    total=total,
-                )
-                for i, (uuid, record) in enumerate(to_fetch.items())
-            ]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Set up progress bar if available
+        from progress import FetchProgress, is_progress_enabled
+
+        fetch_progress = None
+        on_complete = None
+        if is_progress_enabled():
+            fetch_progress = FetchProgress(total=total)
+            fetch_progress.start()
+            on_complete = fetch_progress.advance
+
+        try:
+            async with ScraperClient() as client:
+                tasks = [
+                    _fetch_one(
+                        client,
+                        uuid,
+                        record,
+                        html_dir,
+                        index=i + 1,
+                        total=total,
+                        on_complete=on_complete,
+                    )
+                    for i, (uuid, record) in enumerate(to_fetch.items())
+                ]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            if fetch_progress:
+                fetch_progress.stop()
 
         for result in results:
             if isinstance(result, BaseException):

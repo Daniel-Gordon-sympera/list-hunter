@@ -24,6 +24,9 @@ RETRY_BACKOFF_BASE = 2.0      # exponential: 2s -> 4s -> 8s
 # Pagination
 MAX_PAGES_PER_CATEGORY = 200   # safety limit per practice area
 
+# Parallel crawling
+DEFAULT_PA_WORKERS = 3         # concurrent practice area workers
+
 # Output
 OUTPUT_DIR = "./output"
 DATA_DIR = "./data"

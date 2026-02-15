@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from cli import cmd_crawl_listings, cmd_discover, cmd_export, cmd_fetch_profiles, cmd_parse_profiles, main, setup_logging
+from cli import cmd_crawl_listings, cmd_discover, cmd_export, cmd_fetch_profiles, cmd_parse_profiles, main
+from log_setup import setup_logging
 
 
 # ---------------------------------------------------------------------------
@@ -19,9 +20,11 @@ class TestSetupLogging:
         setup_logging(verbose=True)
         assert logging.getLogger().level == logging.DEBUG
 
-    def test_non_verbose_sets_info(self):
+    def test_non_verbose_sets_info_console(self):
         setup_logging(verbose=False)
-        assert logging.getLogger().level == logging.INFO
+        root = logging.getLogger()
+        assert root.level == logging.DEBUG
+        assert root.handlers[0].level == logging.INFO
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +62,16 @@ class TestHelpOutput:
         assert "input" in captured.out
         assert "--output" in captured.out or "-o" in captured.out
 
+    def test_crawl_listings_help_shows_new_args(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            with patch("sys.argv", ["cli.py", "crawl-listings", "--help"]):
+                main()
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "--practice-areas" in captured.out
+        assert "--max-results" in captured.out
+        assert "--workers" in captured.out
+
 
 # ---------------------------------------------------------------------------
 # Bad arguments
@@ -89,6 +102,7 @@ class TestSubcommandWiring:
         mock_run = AsyncMock(return_value="/data/practice_areas.json")
         args = MagicMock()
         args.location = "Los Angeles, CA"
+        args.verbose = False
 
         with patch("commands.discover.run", mock_run):
             cmd_discover(args)
@@ -99,10 +113,42 @@ class TestSubcommandWiring:
         args = MagicMock()
         args.input = "/data/practice_areas.json"
         args.force = False
+        args.verbose = False
+        args.practice_areas = None
+        args.max_results = None
+        args.workers = None
 
-        with patch("commands.crawl_listings.run", mock_run):
+        with patch("commands.crawl_listings.run", mock_run), \
+             patch("cli.setup_logging"):
             cmd_crawl_listings(args)
-            mock_run.assert_awaited_once_with("/data/practice_areas.json", force=False)
+            mock_run.assert_awaited_once_with(
+                "/data/practice_areas.json",
+                force=False,
+                workers=None,
+                pa_filter=None,
+                max_results=None,
+            )
+
+    def test_cmd_crawl_listings_with_pa_filter(self):
+        mock_run = AsyncMock(return_value="/data/listings.json")
+        args = MagicMock()
+        args.input = "/data/practice_areas.json"
+        args.force = False
+        args.verbose = False
+        args.practice_areas = "family-law, tax-law"
+        args.max_results = 50
+        args.workers = 2
+
+        with patch("commands.crawl_listings.run", mock_run), \
+             patch("cli.setup_logging"):
+            cmd_crawl_listings(args)
+            mock_run.assert_awaited_once_with(
+                "/data/practice_areas.json",
+                force=False,
+                workers=2,
+                pa_filter=["family-law", "tax-law"],
+                max_results=50,
+            )
 
     def test_cmd_fetch_profiles_calls_fetch_run(self):
         mock_run = AsyncMock(return_value="/data/html")
@@ -110,8 +156,10 @@ class TestSubcommandWiring:
         args.input = "/data/listings.json"
         args.force = False
         args.retry_cf = False
+        args.verbose = False
 
-        with patch("commands.fetch_profiles.run", mock_run):
+        with patch("commands.fetch_profiles.run", mock_run), \
+             patch("cli.setup_logging"):
             cmd_fetch_profiles(args)
             mock_run.assert_awaited_once_with("/data/listings.json", force=False, retry_cf=False)
 
@@ -119,8 +167,10 @@ class TestSubcommandWiring:
         mock_run = MagicMock(return_value="/data/records.json")
         args = MagicMock()
         args.data_dir = "/data/html"
+        args.verbose = False
 
-        with patch("commands.parse_profiles.run", mock_run):
+        with patch("commands.parse_profiles.run", mock_run), \
+             patch("cli.setup_logging"):
             cmd_parse_profiles(args)
             mock_run.assert_called_once_with("/data/html")
 
@@ -129,8 +179,10 @@ class TestSubcommandWiring:
         args = MagicMock()
         args.input = "/data/records.json"
         args.output = "/output"
+        args.verbose = False
 
-        with patch("commands.export.run", mock_run):
+        with patch("commands.export.run", mock_run), \
+             patch("cli.setup_logging"):
             cmd_export(args)
             mock_run.assert_called_once_with("/data/records.json", "/output")
 
@@ -139,8 +191,10 @@ class TestSubcommandWiring:
         args = MagicMock()
         args.input = "/data/records.json"
         args.output = None
+        args.verbose = False
 
-        with patch("commands.export.run", mock_run):
+        with patch("commands.export.run", mock_run), \
+             patch("cli.setup_logging"):
             cmd_export(args)
             mock_run.assert_called_once_with("/data/records.json", None)
 
@@ -175,6 +229,21 @@ class TestMainDispatch:
             mock_cmd.assert_called_once()
             args = mock_cmd.call_args[0][0]
             assert args.force is True
+
+    def test_main_crawl_listings_new_flags(self):
+        with patch("sys.argv", [
+            "cli.py", "crawl-listings",
+            "--practice-areas", "family-law,tax-law",
+            "--max-results", "50",
+            "--workers", "2",
+            "/path/to/pa.json",
+        ]), patch("cli.cmd_crawl_listings") as mock_cmd:
+            main()
+            mock_cmd.assert_called_once()
+            args = mock_cmd.call_args[0][0]
+            assert args.practice_areas == "family-law,tax-law"
+            assert args.max_results == 50
+            assert args.workers == 2
 
     def test_main_fetch_profiles_dispatches(self):
         with patch("sys.argv", ["cli.py", "fetch-profiles", "/path/to/listings.json"]), \
@@ -212,7 +281,8 @@ class TestMainDispatch:
 
     def test_main_verbose_flag(self):
         with patch("sys.argv", ["cli.py", "-v", "discover", "LA, CA"]), \
-             patch("cli.cmd_discover"), \
-             patch("cli.setup_logging") as mock_logging:
+             patch("cli.cmd_discover") as mock_cmd:
             main()
-            mock_logging.assert_called_once_with(verbose=True)
+            mock_cmd.assert_called_once()
+            args = mock_cmd.call_args[0][0]
+            assert args.verbose is True

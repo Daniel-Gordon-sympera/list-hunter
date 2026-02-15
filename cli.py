@@ -23,22 +23,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import logging
-import sys
+import os
 
-
-def setup_logging(verbose: bool) -> None:
-    """Configure root logger with timestamp, level, and module name.
-
-    Args:
-        verbose: If True, set level to DEBUG; otherwise INFO.
-    """
-    level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        force=True,
-    )
+from log_setup import setup_logging
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +35,8 @@ def setup_logging(verbose: bool) -> None:
 
 def cmd_discover(args: argparse.Namespace) -> None:
     """Run the discover phase: resolve location to practice area URLs."""
+    setup_logging(verbose=args.verbose, command_name="discover")
+
     from commands import discover
 
     result = asyncio.run(discover.run(args.location))
@@ -56,22 +45,71 @@ def cmd_discover(args: argparse.Namespace) -> None:
 
 def cmd_crawl_listings(args: argparse.Namespace) -> None:
     """Run the crawl-listings phase: paginate listing pages for all practice areas."""
+    from progress import is_progress_enabled
+
+    data_dir = os.path.dirname(args.input)
+    use_progress = is_progress_enabled()
+    setup_logging(
+        verbose=args.verbose,
+        data_dir=data_dir,
+        command_name="crawl-listings",
+        use_rich=use_progress,
+    )
+
+    # Suppress INFO console spam when progress bar is active
+    if use_progress and not args.verbose:
+        import logging
+
+        for h in logging.getLogger().handlers:
+            if isinstance(h, logging.StreamHandler) and not isinstance(
+                h, logging.FileHandler
+            ):
+                h.setLevel(logging.WARNING)
+
     from commands import crawl_listings
 
-    result = asyncio.run(crawl_listings.run(args.input, force=args.force))
+    pa_filter = (
+        [s.strip() for s in args.practice_areas.split(",")]
+        if args.practice_areas
+        else None
+    )
+    result = asyncio.run(
+        crawl_listings.run(
+            args.input,
+            force=args.force,
+            workers=args.workers,
+            pa_filter=pa_filter,
+            max_results=args.max_results,
+        )
+    )
     print(f"Output: {result}")
 
 
 def cmd_fetch_profiles(args: argparse.Namespace) -> None:
     """Run the fetch-profiles phase: download raw profile HTML."""
+    data_dir = os.path.dirname(args.input)
+    setup_logging(
+        verbose=args.verbose,
+        data_dir=data_dir,
+        command_name="fetch-profiles",
+    )
+
     from commands import fetch_profiles
 
-    result = asyncio.run(fetch_profiles.run(args.input, force=args.force, retry_cf=args.retry_cf))
+    result = asyncio.run(
+        fetch_profiles.run(args.input, force=args.force, retry_cf=args.retry_cf)
+    )
     print(f"Output: {result}")
 
 
 def cmd_parse_profiles(args: argparse.Namespace) -> None:
     """Run the parse-profiles phase: parse HTML into structured records."""
+    setup_logging(
+        verbose=args.verbose,
+        data_dir=args.data_dir,
+        command_name="parse-profiles",
+    )
+
     from commands import parse_profiles
 
     result = parse_profiles.run(args.data_dir)
@@ -80,6 +118,13 @@ def cmd_parse_profiles(args: argparse.Namespace) -> None:
 
 def cmd_export(args: argparse.Namespace) -> None:
     """Run the export phase: clean records and write CSV."""
+    data_dir = os.path.dirname(args.input)
+    setup_logging(
+        verbose=args.verbose,
+        data_dir=data_dir,
+        command_name="export",
+    )
+
     from commands import export
 
     result = export.run(args.input, args.output)
@@ -132,6 +177,23 @@ def main() -> None:
         action="store_true",
         default=False,
         help="Ignore checkpoint, re-crawl all practice areas",
+    )
+    sp_crawl.add_argument(
+        "--practice-areas",
+        default=None,
+        help="Comma-separated PA slugs to crawl (default: all)",
+    )
+    sp_crawl.add_argument(
+        "--max-results",
+        type=int,
+        default=None,
+        help="Stop after N unique attorneys collected",
+    )
+    sp_crawl.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Concurrent PA workers (default: 3)",
     )
     sp_crawl.set_defaults(func=cmd_crawl_listings)
 
@@ -188,7 +250,6 @@ def main() -> None:
 
     # -- parse and dispatch --
     args = parser.parse_args()
-    setup_logging(verbose=args.verbose)
     args.func(args)
 
 
