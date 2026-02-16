@@ -96,8 +96,28 @@ def cmd_fetch_profiles(args: argparse.Namespace) -> None:
 
     from commands import fetch_profiles
 
+    # Parse delay
+    delay = None
+    if args.delay:
+        parts = args.delay.split(",")
+        if len(parts) != 2:
+            print("Error: --delay must be MIN,MAX (e.g. 1.0,3.0)")
+            raise SystemExit(1)
+        delay = (float(parts[0].strip()), float(parts[1].strip()))
+        if delay[0] > delay[1]:
+            print("Error: --delay MIN must be <= MAX")
+            raise SystemExit(1)
+
     result = asyncio.run(
-        fetch_profiles.run(args.input, force=args.force, retry_cf=args.retry_cf)
+        fetch_profiles.run(
+            args.input,
+            force=args.force,
+            retry_cf=args.retry_cf,
+            browsers=args.browsers or 1,
+            delay=delay,
+            page_wait=args.page_wait,
+            no_httpx=args.no_httpx,
+        )
     )
     print(f"Output: {result}")
 
@@ -217,6 +237,29 @@ def main() -> None:
         action="store_true",
         default=False,
         help="Re-download only HTML files that are Cloudflare challenge pages",
+    )
+    sp_fetch.add_argument(
+        "--browsers",
+        type=int,
+        default=None,
+        help="Number of browser instances for fallback (default: 1)",
+    )
+    sp_fetch.add_argument(
+        "--delay",
+        default=None,
+        help="Delay range as MIN,MAX seconds (default: 2.0,5.0). Example: --delay 1.0,3.0",
+    )
+    sp_fetch.add_argument(
+        "--page-wait",
+        type=float,
+        default=None,
+        help="Seconds to wait for JS after page load (default: 2.0)",
+    )
+    sp_fetch.add_argument(
+        "--no-httpx",
+        action="store_true",
+        default=False,
+        help="Disable httpx fast path, use browser for all requests",
     )
     sp_fetch.set_defaults(func=cmd_fetch_profiles)
 

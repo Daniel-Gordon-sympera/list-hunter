@@ -72,6 +72,17 @@ class TestHelpOutput:
         assert "--max-results" in captured.out
         assert "--workers" in captured.out
 
+    def test_fetch_profiles_help_shows_new_args(self, capsys):
+        with pytest.raises(SystemExit) as exc_info:
+            with patch("sys.argv", ["cli.py", "fetch-profiles", "--help"]):
+                main()
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "--browsers" in captured.out
+        assert "--delay" in captured.out
+        assert "--page-wait" in captured.out
+        assert "--no-httpx" in captured.out
+
 
 # ---------------------------------------------------------------------------
 # Bad arguments
@@ -157,11 +168,73 @@ class TestSubcommandWiring:
         args.force = False
         args.retry_cf = False
         args.verbose = False
+        args.browsers = None
+        args.delay = None
+        args.page_wait = None
+        args.no_httpx = False
 
         with patch("commands.fetch_profiles.run", mock_run), \
              patch("cli.setup_logging"):
             cmd_fetch_profiles(args)
-            mock_run.assert_awaited_once_with("/data/listings.json", force=False, retry_cf=False)
+            mock_run.assert_awaited_once_with(
+                "/data/listings.json",
+                force=False,
+                retry_cf=False,
+                browsers=1,
+                delay=None,
+                page_wait=None,
+                no_httpx=False,
+            )
+
+    def test_cmd_fetch_profiles_passes_new_params(self):
+        mock_run = AsyncMock(return_value="/data/html")
+        args = MagicMock()
+        args.input = "/data/listings.json"
+        args.force = False
+        args.retry_cf = False
+        args.verbose = False
+        args.browsers = 5
+        args.delay = "1.0,2.0"
+        args.page_wait = 0.5
+        args.no_httpx = False
+
+        with patch("commands.fetch_profiles.run", mock_run), \
+             patch("cli.setup_logging"):
+            cmd_fetch_profiles(args)
+            mock_run.assert_awaited_once_with(
+                "/data/listings.json",
+                force=False,
+                retry_cf=False,
+                browsers=5,
+                delay=(1.0, 2.0),
+                page_wait=0.5,
+                no_httpx=False,
+            )
+
+    def test_cmd_fetch_profiles_default_params(self):
+        mock_run = AsyncMock(return_value="/data/html")
+        args = MagicMock()
+        args.input = "/data/listings.json"
+        args.force = False
+        args.retry_cf = False
+        args.verbose = False
+        args.browsers = None
+        args.delay = None
+        args.page_wait = None
+        args.no_httpx = False
+
+        with patch("commands.fetch_profiles.run", mock_run), \
+             patch("cli.setup_logging"):
+            cmd_fetch_profiles(args)
+            mock_run.assert_awaited_once_with(
+                "/data/listings.json",
+                force=False,
+                retry_cf=False,
+                browsers=1,
+                delay=None,
+                page_wait=None,
+                no_httpx=False,
+            )
 
     def test_cmd_parse_profiles_calls_parse_run(self):
         mock_run = MagicMock(return_value="/data/records.json")
@@ -252,6 +325,23 @@ class TestMainDispatch:
             mock_cmd.assert_called_once()
             args = mock_cmd.call_args[0][0]
             assert args.input == "/path/to/listings.json"
+
+    def test_main_fetch_profiles_new_flags(self):
+        with patch("sys.argv", [
+            "cli.py", "fetch-profiles",
+            "--browsers", "5",
+            "--delay", "1.0,2.0",
+            "--page-wait", "0.5",
+            "--no-httpx",
+            "/path/to/listings.json",
+        ]), patch("cli.cmd_fetch_profiles") as mock_cmd:
+            main()
+            mock_cmd.assert_called_once()
+            args = mock_cmd.call_args[0][0]
+            assert args.browsers == 5
+            assert args.delay == "1.0,2.0"
+            assert args.page_wait == 0.5
+            assert args.no_httpx is True
 
     def test_main_parse_profiles_dispatches(self):
         with patch("sys.argv", ["cli.py", "parse-profiles", "/path/to/data"]), \
