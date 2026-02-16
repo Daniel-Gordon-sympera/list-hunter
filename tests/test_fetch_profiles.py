@@ -1,12 +1,14 @@
 # tests/test_fetch_profiles.py
 """Tests for commands/fetch_profiles.py: idempotency, flags, status tracking, error handling."""
 
+import asyncio
 import json
 import os
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import config
 from commands.fetch_profiles import run, _fetch_one
 
 
@@ -236,3 +238,164 @@ class TestEdgeCases:
         assert statuses["ok-uuid"] == "success"
         # error-uuid might not be in statuses (exception loses the uuid mapping)
         # This documents the known limitation from research.md section 5.2
+
+
+# ---------------------------------------------------------------------------
+# Helpers for httpx sweep tests
+# ---------------------------------------------------------------------------
+
+def _fake_listing(uuid, name="Test Attorney"):
+    return {
+        "uuid": uuid,
+        "name": name,
+        "profile_url": f"https://profiles.superlawyers.com/california/la/lawyer/test/{uuid}.html",
+    }
+
+
+def _write_listings(tmp_path, listings):
+    path = tmp_path / "listings.json"
+    path.write_text(json.dumps(listings), encoding="utf-8")
+    return str(path)
+
+
+# ---------------------------------------------------------------------------
+# httpx fetch-one tests
+# ---------------------------------------------------------------------------
+
+class TestHttpxFetchOne:
+    @pytest.mark.asyncio
+    async def test_returns_html_on_success(self, tmp_path):
+        from commands.fetch_profiles import _httpx_fetch_one
+
+        html_dir = str(tmp_path / "html")
+        os.makedirs(html_dir)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "<html><body>profile content</body></html>"
+        mock_response.headers = {}
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        uuid, status = await _httpx_fetch_one(
+            mock_client, "uuid-1", _fake_listing("uuid-1"), html_dir,
+        )
+        assert status == "success"
+        assert os.path.exists(os.path.join(html_dir, "uuid-1.html"))
+
+    @pytest.mark.asyncio
+    async def test_returns_cf_blocked_on_challenge(self, tmp_path):
+        from commands.fetch_profiles import _httpx_fetch_one
+
+        html_dir = str(tmp_path / "html")
+        os.makedirs(html_dir)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "<html><title>Just a moment...</title></html>"
+        mock_response.headers = {}
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        uuid, status = await _httpx_fetch_one(
+            mock_client, "uuid-1", _fake_listing("uuid-1"), html_dir,
+        )
+        assert status == "cf_blocked"
+        assert not os.path.exists(os.path.join(html_dir, "uuid-1.html"))
+
+    @pytest.mark.asyncio
+    async def test_returns_failed_on_404(self, tmp_path):
+        from commands.fetch_profiles import _httpx_fetch_one
+
+        html_dir = str(tmp_path / "html")
+        os.makedirs(html_dir)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+        mock_response.text = "Not Found"
+        mock_response.headers = {}
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        uuid, status = await _httpx_fetch_one(
+            mock_client, "uuid-1", _fake_listing("uuid-1"), html_dir,
+        )
+        assert status == "failed"
+
+    @pytest.mark.asyncio
+    async def test_returns_failed_on_exception(self, tmp_path):
+        from commands.fetch_profiles import _httpx_fetch_one
+
+        html_dir = str(tmp_path / "html")
+        os.makedirs(html_dir)
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=Exception("connection error"))
+
+        uuid, status = await _httpx_fetch_one(
+            mock_client, "uuid-1", _fake_listing("uuid-1"), html_dir,
+        )
+        assert status == "failed"
+
+
+# ---------------------------------------------------------------------------
+# httpx sweep tests
+# ---------------------------------------------------------------------------
+
+class TestHttpxSweep:
+    @pytest.mark.asyncio
+    async def test_sweep_returns_statuses(self, tmp_path):
+        from commands.fetch_profiles import _httpx_sweep
+
+        html_dir = str(tmp_path / "html")
+        os.makedirs(html_dir)
+        to_fetch = {"uuid-1": _fake_listing("uuid-1")}
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "<html>profile</html>"
+        mock_response.headers = {}
+
+        with patch("commands.fetch_profiles.httpx") as mock_httpx:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_httpx.AsyncClient.return_value = mock_client
+
+            statuses, cf_blocked = await _httpx_sweep(
+                to_fetch, html_dir, delay_min=0.0, delay_max=0.0,
+            )
+
+        assert statuses["uuid-1"] == "success"
+        assert len(cf_blocked) == 0
+
+    @pytest.mark.asyncio
+    async def test_sweep_collects_cf_blocked(self, tmp_path):
+        from commands.fetch_profiles import _httpx_sweep
+
+        html_dir = str(tmp_path / "html")
+        os.makedirs(html_dir)
+        to_fetch = {"uuid-cf": _fake_listing("uuid-cf")}
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "<html><title>Just a moment...</title></html>"
+        mock_response.headers = {}
+
+        with patch("commands.fetch_profiles.httpx") as mock_httpx:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_httpx.AsyncClient.return_value = mock_client
+
+            statuses, cf_blocked = await _httpx_sweep(
+                to_fetch, html_dir, delay_min=0.0, delay_max=0.0,
+            )
+
+        assert "uuid-cf" not in statuses
+        assert "uuid-cf" in cf_blocked

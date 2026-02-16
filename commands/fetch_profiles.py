@@ -15,10 +15,135 @@ import json
 import logging
 import os
 
+import httpx
+
 import config
-from http_client import ScraperClient, is_cloudflare_challenge
+from http_client import ScraperClient, ScraperPool, is_cloudflare_challenge, is_cloudflare_challenge_response
 
 log = logging.getLogger(__name__)
+
+_HTTPX_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+}
+
+
+async def _httpx_fetch_one(
+    client: httpx.AsyncClient,
+    uuid: str,
+    record: dict,
+    html_dir: str,
+    on_complete=None,
+) -> tuple[str, str]:
+    """Try fetching a profile with httpx. Returns (uuid, status).
+
+    Status is one of: "success", "cf_blocked", "failed".
+    "cf_blocked" means the response was a Cloudflare challenge and should
+    be retried with a browser.
+    """
+    profile_url = record.get("profile_url", "")
+    html_path = os.path.join(html_dir, f"{uuid}.html")
+
+    try:
+        response = await client.get(profile_url)
+    except Exception as exc:
+        log.debug("httpx error for %s: %s", uuid, exc)
+        if on_complete:
+            on_complete()
+        return uuid, "failed"
+
+    if response.status_code == 404:
+        log.debug("httpx 404 for %s", uuid)
+        if on_complete:
+            on_complete()
+        return uuid, "failed"
+
+    if response.status_code >= 400:
+        log.debug("httpx %d for %s", response.status_code, uuid)
+        if on_complete:
+            on_complete()
+        return uuid, "failed"
+
+    html = response.text
+    headers = dict(response.headers)
+
+    if is_cloudflare_challenge_response(html, headers):
+        log.debug("httpx CF challenge for %s", uuid)
+        if on_complete:
+            on_complete()
+        return uuid, "cf_blocked"
+
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html)
+    if on_complete:
+        on_complete()
+    return uuid, "success"
+
+
+async def _httpx_sweep(
+    to_fetch: dict[str, dict],
+    html_dir: str,
+    delay_min: float = 0.0,
+    delay_max: float = 0.0,
+    max_concurrent: int | None = None,
+    on_complete=None,
+) -> tuple[dict[str, str], dict[str, dict]]:
+    """Try fetching all profiles with httpx. Returns (statuses, cf_blocked).
+
+    statuses: {uuid: "success"|"failed"} for completed profiles.
+    cf_blocked: {uuid: record} for profiles needing browser fallback.
+    """
+    import random
+
+    concurrent = max_concurrent or config.DEFAULT_HTTPX_CONCURRENT
+    sem = asyncio.Semaphore(concurrent)
+    statuses: dict[str, str] = {}
+    cf_blocked: dict[str, dict] = {}
+
+    proxy_url = config.PROXY_URL
+
+    async def bounded_fetch(httpx_client, uuid, record):
+        if delay_min > 0 or delay_max > 0:
+            await asyncio.sleep(random.uniform(delay_min, delay_max))
+        async with sem:
+            return await _httpx_fetch_one(
+                httpx_client, uuid, record, html_dir, on_complete=on_complete,
+            )
+
+    async with httpx.AsyncClient(
+        proxy=proxy_url,
+        headers=_HTTPX_HEADERS,
+        timeout=config.REQUEST_TIMEOUT,
+        follow_redirects=True,
+    ) as httpx_client:
+        tasks = [
+            bounded_fetch(httpx_client, uuid, record)
+            for uuid, record in to_fetch.items()
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for result in results:
+        if isinstance(result, BaseException):
+            log.error("httpx task exception: %s", result)
+            continue
+        uuid, status = result
+        if status == "cf_blocked":
+            cf_blocked[uuid] = to_fetch[uuid]
+        else:
+            statuses[uuid] = status
+
+    log.info(
+        "httpx sweep: %d success, %d failed, %d CF-blocked",
+        sum(1 for s in statuses.values() if s == "success"),
+        sum(1 for s in statuses.values() if s == "failed"),
+        len(cf_blocked),
+    )
+    return statuses, cf_blocked
 
 
 async def _fetch_one(
