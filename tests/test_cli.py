@@ -71,6 +71,10 @@ class TestHelpOutput:
         assert "--practice-areas" in captured.out
         assert "--max-results" in captured.out
         assert "--workers" in captured.out
+        assert "--browsers" in captured.out
+        assert "--delay" in captured.out
+        assert "--page-wait" in captured.out
+        assert "--no-httpx" in captured.out
 
     def test_fetch_profiles_help_shows_new_args(self, capsys):
         with pytest.raises(SystemExit) as exc_info:
@@ -128,6 +132,10 @@ class TestSubcommandWiring:
         args.practice_areas = None
         args.max_results = None
         args.workers = None
+        args.browsers = None
+        args.delay = None
+        args.page_wait = None
+        args.no_httpx = False
 
         with patch("commands.crawl_listings.run", mock_run), \
              patch("cli.setup_logging"):
@@ -138,6 +146,10 @@ class TestSubcommandWiring:
                 workers=None,
                 pa_filter=None,
                 max_results=None,
+                browsers=1,
+                delay=None,
+                page_wait=None,
+                no_httpx=False,
             )
 
     def test_cmd_crawl_listings_with_pa_filter(self):
@@ -149,6 +161,10 @@ class TestSubcommandWiring:
         args.practice_areas = "family-law, tax-law"
         args.max_results = 50
         args.workers = 2
+        args.browsers = None
+        args.delay = None
+        args.page_wait = None
+        args.no_httpx = False
 
         with patch("commands.crawl_listings.run", mock_run), \
              patch("cli.setup_logging"):
@@ -159,6 +175,39 @@ class TestSubcommandWiring:
                 workers=2,
                 pa_filter=["family-law", "tax-law"],
                 max_results=50,
+                browsers=1,
+                delay=None,
+                page_wait=None,
+                no_httpx=False,
+            )
+
+    def test_cmd_crawl_listings_passes_new_params(self):
+        mock_run = AsyncMock(return_value="/data/listings.json")
+        args = MagicMock()
+        args.input = "/data/practice_areas.json"
+        args.force = False
+        args.verbose = False
+        args.practice_areas = None
+        args.max_results = None
+        args.workers = None
+        args.browsers = 3
+        args.delay = "1.0,2.5"
+        args.page_wait = 1.5
+        args.no_httpx = True
+
+        with patch("commands.crawl_listings.run", mock_run), \
+             patch("cli.setup_logging"):
+            cmd_crawl_listings(args)
+            mock_run.assert_awaited_once_with(
+                "/data/practice_areas.json",
+                force=False,
+                workers=None,
+                pa_filter=None,
+                max_results=None,
+                browsers=3,
+                delay=(1.0, 2.5),
+                page_wait=1.5,
+                no_httpx=True,
             )
 
     def test_cmd_fetch_profiles_calls_fetch_run(self):
@@ -317,6 +366,23 @@ class TestMainDispatch:
             assert args.practice_areas == "family-law,tax-law"
             assert args.max_results == 50
             assert args.workers == 2
+
+    def test_main_crawl_listings_httpx_flags(self):
+        with patch("sys.argv", [
+            "cli.py", "crawl-listings",
+            "--browsers", "3",
+            "--delay", "1.0,2.0",
+            "--page-wait", "1.5",
+            "--no-httpx",
+            "/path/to/pa.json",
+        ]), patch("cli.cmd_crawl_listings") as mock_cmd:
+            main()
+            mock_cmd.assert_called_once()
+            args = mock_cmd.call_args[0][0]
+            assert args.browsers == 3
+            assert args.delay == "1.0,2.0"
+            assert args.page_wait == 1.5
+            assert args.no_httpx is True
 
     def test_main_fetch_profiles_dispatches(self):
         with patch("sys.argv", ["cli.py", "fetch-profiles", "/path/to/listings.json"]), \

@@ -14,7 +14,10 @@ Features:
 - Max results cap via --max-results
 - Parallel workers via --workers (default: 3)
 - Resume: completed per-PA files are detected and skipped
+- httpx fast path with browser fallback (like fetch-profiles)
 """
+
+from __future__ import annotations
 
 import asyncio
 import glob as globmod
@@ -24,11 +27,23 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+import httpx
+
 import config
-from http_client import ScraperClient
+from http_client import ScraperPool, is_cloudflare_challenge_response
 from parsers.listing_parser import parse_listing_page
 
 log = logging.getLogger(__name__)
+
+_HTTPX_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+}
 
 
 def _atomic_write(path: str, data: dict) -> None:
@@ -65,8 +80,44 @@ class CrawlState:
         return False
 
 
+async def _httpx_fetch_listing_page(
+    client: httpx.AsyncClient,
+    url: str,
+    referer: str | None = None,
+) -> tuple[str | None, str]:
+    """Fetch a single listing page via httpx+proxy.
+
+    Returns:
+        (html | None, status) where status is "success", "cf_blocked", or "failed".
+    """
+    headers = {"Referer": referer} if referer else {}
+    try:
+        response = await client.get(url, headers=headers)
+    except Exception as exc:
+        log.debug("httpx error for %s: %s", url, exc)
+        return None, "failed"
+
+    if response.status_code == 404:
+        log.debug("httpx 404 for %s", url)
+        return None, "failed"
+
+    if response.status_code >= 400:
+        log.debug("httpx %d for %s", response.status_code, url)
+        return None, "failed"
+
+    html = response.text
+    resp_headers = dict(response.headers)
+
+    if is_cloudflare_challenge_response(html, resp_headers):
+        log.debug("httpx CF challenge for %s", url)
+        return None, "cf_blocked"
+
+    return html, "success"
+
+
 async def _crawl_one_pa(
-    client: ScraperClient,
+    httpx_client: httpx.AsyncClient | None,
+    browser_client: ScraperPool | None,
     pa_slug: str,
     state_slug: str,
     city_slug: str,
@@ -75,10 +126,12 @@ async def _crawl_one_pa(
     crawl_state: CrawlState,
     pa_index: int,
     total_pas: int,
+    no_httpx: bool = False,
     progress_callback=None,
 ) -> tuple[str, dict[str, dict]]:
     """Crawl all pages of a single practice area.
 
+    Tries httpx first for each page; falls back to browser if CF-blocked.
     Writes listings_{pa_slug}.json atomically on completion.
 
     Returns:
@@ -99,7 +152,25 @@ async def _crawl_one_pa(
             f"{config.BASE_URL}/{pa_slug}/{state_slug}/{city_slug}/"
             f"?page={page}"
         )
-        html = await client.fetch(url, referer=referer)
+
+        html = None
+
+        # Try httpx fast path
+        if not no_httpx and httpx_client is not None:
+            html, status = await _httpx_fetch_listing_page(
+                httpx_client, url, referer=referer,
+            )
+            if status == "success":
+                log.debug("[%d/%d] %s p.%d: httpx success", pa_index, total_pas, pa_slug, page)
+            elif status == "cf_blocked":
+                log.debug("[%d/%d] %s p.%d: httpx CF-blocked, trying browser", pa_index, total_pas, pa_slug, page)
+                html = None  # ensure fallback
+            else:
+                log.debug("[%d/%d] %s p.%d: httpx failed, trying browser", pa_index, total_pas, pa_slug, page)
+
+        # Browser fallback
+        if html is None and browser_client is not None:
+            html = await browser_client.fetch(url, referer=referer)
 
         if html is None:
             log.info(
@@ -218,8 +289,16 @@ async def run(
     pa_filter: list[str] | None = None,
     max_results: int | None = None,
     progress_callback=None,
+    browsers: int = 1,
+    delay: tuple[float, float] | None = None,
+    page_wait: float | None = None,
+    no_httpx: bool = False,
 ) -> str:
     """Crawl listing pages for all practice areas and collect attorney records.
+
+    Uses a two-phase approach per page: try httpx first (fast, ~200ms),
+    fall back to browser if CF-blocked (~7s). Browser fallback uses
+    ScraperPool for multi-browser support.
 
     Args:
         practice_areas_path: Path to practice_areas.json produced by the
@@ -230,6 +309,10 @@ async def run(
         pa_filter: Optional list of PA slugs to limit crawling to.
         max_results: Optional cap on unique attorneys to collect.
         progress_callback: Optional callback(pa_slug, page, new_count) for progress display.
+        browsers: Number of browser instances for fallback (default: 1).
+        delay: (min, max) inter-request delay in seconds for browser.
+        page_wait: Seconds to wait for JS after page load (browser only).
+        no_httpx: Disable httpx fast path, use browser for all requests.
 
     Returns:
         Path to the generated listings.json file.
@@ -245,6 +328,9 @@ async def run(
     output_path = os.path.join(data_dir, "listings.json")
 
     num_workers = workers or config.DEFAULT_PA_WORKERS
+
+    delay_min = delay[0] if delay else None
+    delay_max = delay[1] if delay else None
 
     # Apply PA filter
     if pa_filter:
@@ -281,22 +367,55 @@ async def run(
         async def bounded_crawl(pa_slug: str, pa_index: int):
             async with worker_sem:
                 return await _crawl_one_pa(
-                    client, pa_slug, state_slug, city_slug,
-                    data_dir, referer, crawl_state,
-                    pa_index, total_pas, progress_callback,
+                    httpx_client, browser_client, pa_slug,
+                    state_slug, city_slug, data_dir, referer,
+                    crawl_state, pa_index, total_pas,
+                    no_httpx=no_httpx,
+                    progress_callback=progress_callback,
                 )
 
-        async with ScraperClient() as client:
+        # Set up httpx client (unless disabled)
+        httpx_client = None
+        httpx_cm = None
+        if not no_httpx:
+            httpx_cm = httpx.AsyncClient(
+                proxy=config.PROXY_URL,
+                headers=_HTTPX_HEADERS,
+                timeout=config.REQUEST_TIMEOUT,
+                follow_redirects=True,
+            )
+
+        # Set up browser pool for fallback
+        browser_pool_cm = ScraperPool(
+            num_browsers=browsers,
+            delay_min=delay_min,
+            delay_max=delay_max,
+            page_wait=page_wait,
+        )
+
+        try:
+            # Enter httpx context if enabled
+            if httpx_cm is not None:
+                httpx_client = await httpx_cm.__aenter__()
+
+            browser_client = await browser_pool_cm.__aenter__()
+
             tasks = [
                 bounded_crawl(pa_slug, practice_areas.index(pa_slug) + 1)
                 for pa_slug in remaining
             ]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Log any exceptions
-        for result in results:
-            if isinstance(result, BaseException):
-                log.error("PA worker raised exception: %s", result)
+            # Log any exceptions
+            for result in results:
+                if isinstance(result, BaseException):
+                    log.error("PA worker raised exception: %s", result)
+        finally:
+            # Close browser pool
+            await browser_pool_cm.__aexit__(None, None, None)
+            # Close httpx client
+            if httpx_cm is not None:
+                await httpx_cm.__aexit__(None, None, None)
 
     # Merge phase: combine all per-PA files
     all_records = _merge_pa_files(data_dir, max_results=max_results)

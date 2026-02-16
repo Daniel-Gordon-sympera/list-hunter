@@ -10,14 +10,25 @@ Implementation in progress. All five pipeline phases are functional. The impleme
 
 A Python async web scraper for the Super Lawyers attorney directory. Accepts a city/state location and produces a CSV with 33 structured columns per attorney, scraped from `attorneys.superlawyers.com` (listings) and `profiles.superlawyers.com` (individual profiles).
 
+## Setup
+
+```bash
+pip install -r requirements.txt
+playwright install
+```
+
+Note: `python-dotenv` is used in `config.py` (for `PROXY_URL` etc.) but is not in `requirements.txt`. Install manually if needed: `pip install python-dotenv`.
+
 ## Tech Stack
 
 - Python 3.11+
 - `crawl4ai` (Playwright-based browser automation for HTTP — bypasses Cloudflare)
+- `httpx` (fast-path profile fetching — lightweight HTTP before browser fallback)
 - `beautifulsoup4` + `lxml` (HTML parsing)
 - `tenacity` (retries with exponential backoff), `python-slugify` (URL slugs)
 - `rich` (progress bars for crawl-listings and fetch-profiles)
-- Testing: `pytest` with saved HTML fixtures for offline parser tests
+- `python-dotenv` (environment variable loading for proxy config)
+- Testing: `pytest`, `pytest-asyncio`, saved HTML fixtures for offline parser tests
 
 ## Commands
 
@@ -38,12 +49,23 @@ python cli.py crawl-listings --max-results 100 data/los-angeles_ca/practice_area
 # Re-crawl listings from scratch (ignore checkpoint)
 python cli.py crawl-listings --force data/los-angeles_ca/practice_areas.json
 
+# fetch-profiles with performance tuning
+python cli.py fetch-profiles --browsers 3 --delay 1.0,3.0 --page-wait 1.5 data/los-angeles_ca/listings.json
+
+# Skip httpx fast path, use browser for all profiles
+python cli.py fetch-profiles --no-httpx data/los-angeles_ca/listings.json
+
 # Re-parse without re-fetching (after fixing selectors)
 python cli.py parse-profiles data/los-angeles_ca/
 python cli.py export data/los-angeles_ca/records.json
 
+# Run all 5 phases in sequence
+python main.py "Los Angeles, CA"
+
 # Tests
 pytest tests/
+pytest tests/test_listing_parser.py -v          # one test file
+pytest tests/test_listing_parser.py::test_fn -v # one test function
 ```
 
 ## Architecture: Separate Phase Commands
@@ -63,7 +85,7 @@ export           → output/*.csv           (cleaned, UTF-8 BOM, QUOTE_ALL)
 
 `crawl-listings` runs practice areas in parallel (`--workers`, default 3). Each worker writes a per-PA file (`listings_{pa_slug}.json`) on completion. A final merge phase combines them into `listings.json` with UUID deduplication, then cleans up per-PA files. Interrupted runs resume automatically — completed per-PA files are detected and skipped. Use `--force` to re-crawl from scratch.
 
-`fetch-profiles` is naturally idempotent — skips UUIDs with existing HTML files on disk.
+`fetch-profiles` uses a two-phase approach: httpx first (fast, lightweight), then browser fallback for failures. `ScraperPool` in `http_client.py` manages multiple browser instances with round-robin distribution. Naturally idempotent — skips UUIDs with existing HTML files on disk.
 
 ## Project Structure
 
@@ -72,7 +94,7 @@ cli.py                      — CLI entry point (argparse, 5 subcommands)
 main.py                     — Full pipeline runner (chains all 5 phases for a single location)
 config.py                   — Constants (URLs, delays, concurrency limits)
 models.py                   — AttorneyRecord dataclass (33 fields, 7 groups)
-http_client.py              — Crawl4AI wrapper (stealth browser, semaphore, retry, CF detection)
+http_client.py              — Crawl4AI wrapper (ScraperClient + ScraperPool, stealth browser, retry, CF detection)
 log_setup.py                — Centralized logging (console + file handlers)
 progress.py                 — Rich progress bars (CrawlProgress, FetchProgress)
 spike.py                    — Validation spike (throwaway — fixture generation)
@@ -90,10 +112,18 @@ docs/                       — Research and plan documentation
 resources/                  — Reference docs (crawl4ai, LLM API docs)
 tests/
   fixtures/                 — Real HTML saved from scraping runs
+  test_address_parser.py
   test_cli.py
   test_crawl_listings.py
+  test_discover.py
+  test_export.py
+  test_fetch_profiles.py
   test_http_client.py
+  test_listing_parser.py
   test_log_setup.py
+  test_models.py
+  test_parse_profiles.py
+  test_profile_parser.py
   test_progress.py
 ```
 

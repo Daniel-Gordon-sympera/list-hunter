@@ -73,6 +73,19 @@ def cmd_crawl_listings(args: argparse.Namespace) -> None:
         if args.practice_areas
         else None
     )
+
+    # Parse delay
+    delay = None
+    if args.delay:
+        parts = args.delay.split(",")
+        if len(parts) != 2:
+            print("Error: --delay must be MIN,MAX (e.g. 1.0,3.0)")
+            raise SystemExit(1)
+        delay = (float(parts[0].strip()), float(parts[1].strip()))
+        if delay[0] > delay[1]:
+            print("Error: --delay MIN must be <= MAX")
+            raise SystemExit(1)
+
     result = asyncio.run(
         crawl_listings.run(
             args.input,
@@ -80,6 +93,10 @@ def cmd_crawl_listings(args: argparse.Namespace) -> None:
             workers=args.workers,
             pa_filter=pa_filter,
             max_results=args.max_results,
+            browsers=args.browsers or 1,
+            delay=delay,
+            page_wait=args.page_wait,
+            no_httpx=args.no_httpx,
         )
     )
     print(f"Output: {result}")
@@ -214,6 +231,29 @@ def main() -> None:
         type=int,
         default=None,
         help="Concurrent PA workers (default: 3)",
+    )
+    sp_crawl.add_argument(
+        "--browsers",
+        type=int,
+        default=None,
+        help="Number of browser instances for fallback (default: 1)",
+    )
+    sp_crawl.add_argument(
+        "--delay",
+        default=None,
+        help="Delay range as MIN,MAX seconds (default: 2.0,5.0). Example: --delay 1.0,3.0",
+    )
+    sp_crawl.add_argument(
+        "--page-wait",
+        type=float,
+        default=None,
+        help="Seconds to wait for JS after page load (default: 2.0)",
+    )
+    sp_crawl.add_argument(
+        "--no-httpx",
+        action="store_true",
+        default=False,
+        help="Disable httpx fast path, use browser for all requests",
     )
     sp_crawl.set_defaults(func=cmd_crawl_listings)
 

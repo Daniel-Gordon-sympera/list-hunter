@@ -4,17 +4,20 @@
 
 The Super Lawyers scraper is a 5-phase async pipeline that produces a 33-column CSV of attorneys from `superlawyers.com`. Phases communicate through files on disk, not in-memory state, enabling selective re-runs (e.g., re-parse without re-fetching).
 
-**Current state:** Implementation in progress. All five phases are functional. Core parsers (listing + profile) have solid test coverage. Command-level tests exist for discover, parse-profiles, and export. Integration testing is absent.
+**Current state:** Implementation in progress. All five phases are functional. 252 tests across 13 files cover all modules. `fetch-profiles` now uses a two-phase httpx + browser fallback approach. `crawl-listings` supports parallel PA workers. Integration testing is absent.
 
 **Key finding:** The design doc (`docs/plans/2026-02-10-superlawyers-scraper-design.md`) specified `httpx` for HTTP but the implementation pivoted to **Crawl4AI** (Playwright-based browser automation) to bypass Cloudflare protection. This is a positive change — real browser navigation with valid TLS fingerprints and JS execution provides substantially better anti-bot defense than raw HTTP requests. However, the pivot introduced new concerns around concurrency, resource management, and configuration that the original design didn't address.
 
 **Tech stack (actual):**
 - Python 3.11+
 - `crawl4ai` (Playwright browser automation for HTTP)
+- `httpx` (fast-path profile fetching — lightweight HTTP before browser fallback)
 - `beautifulsoup4` + `lxml` (HTML parsing)
 - `tenacity` (retry with exponential backoff)
 - `python-slugify` (URL slug generation)
-- `pytest` (testing with saved HTML fixtures)
+- `rich` (progress bars for crawl-listings and fetch-profiles)
+- `python-dotenv` (environment variable loading for proxy config)
+- `pytest`, `pytest-asyncio` (testing with saved HTML fixtures)
 
 ---
 
@@ -38,7 +41,7 @@ cli.py                        CLI entry point (argparse, 5 subcommands)
 main.py                       Full pipeline runner (chains all 5 phases)
 config.py                     Constants (URLs, delays, concurrency, paths)
 models.py                     AttorneyRecord dataclass (33 fields, 7 groups)
-http_client.py                Crawl4AI wrapper (stealth, semaphore, retry, CF detection)
+http_client.py                Crawl4AI wrapper (ScraperClient + ScraperPool, stealth, retry, CF detection)
 spike.py                      Validation spike (httpx, fixture generation — throwaway)
 
 commands/
@@ -86,7 +89,7 @@ tests/fixtures/               Saved HTML from real scraping runs
 
 ### Identified Gaps
 
-1. **No proxy rotation** — All requests originate from a single IP. Sustained scraping of 2000+ profiles will trigger IP-level rate limits or bans. `BrowserConfig` supports a `proxy` parameter but it's unused. This is the highest-risk gap for production runs.
+1. ~~**No proxy rotation**~~ **FIXED** — Proxy support added via `PROXY_URL` env var. `ScraperClient` passes proxy config to `BrowserConfig(proxy_config=...)`. Bright Data residential proxy rotates IPs server-side through a single endpoint.
 
 2. ~~**No User-Agent rotation**~~ — The scraper relies on Crawl4AI's default Chromium UA. The design doc originally planned a `fake-useragent` pool of 10-15 UAs but this was never implemented (and `fake-useragent` isn't in `requirements.txt`). A single, static UA string across thousands of requests is a fingerprinting signal. **PARTIALLY ADDRESSED** — `Sec-Fetch-*` and `Accept-Language` headers now sent via `BrowserConfig.headers`, reducing fingerprint surface. UA rotation remains a P2 item.
 
@@ -100,7 +103,7 @@ tests/fixtures/               Saved HTML from real scraping runs
 
 7. **No cookie jar inspection** — The persistent browser profile stores cookies, but there's no validation that the `cf_clearance` cookie was actually set after passing a challenge. This cookie is the real success signal for CF bypass — its absence means the challenge wasn't solved.
 
-8. **2-second JS delay may be insufficient** — Complex Turnstile challenges can take 5-10 seconds to resolve. `config.DELAY_BEFORE_RETURN` (2.0s) is fixed and applied uniformly. Should be configurable per-request or auto-detect challenge completion via page mutation observer.
+8. ~~**2-second JS delay may be insufficient**~~ **PARTIALLY FIXED** — Now configurable via `--page-wait SECS` CLI flag on `fetch-profiles`. Default remains 2.0s but can be increased for sites with heavier JS challenges. Auto-detection via mutation observer is still a future enhancement.
 
 ---
 
@@ -109,20 +112,21 @@ tests/fixtures/               Saved HTML from real scraping runs
 ### Current Model
 
 - `asyncio.Semaphore(3)` caps parallel fetches (`config.MAX_CONCURRENT = 3`)
-- Random 2-5s delay per request *inside* the semaphore (`http_client.py:117-121`)
-- Single Chromium browser instance shared across all concurrent requests
-- `crawl-listings` runs **sequentially** per practice area (`crawl_listings.py:48` — `for idx, pa_slug in enumerate(practice_areas)`)
+- Random 2-5s delay per request *before* semaphore acquire for better throughput
+- `ScraperPool` manages multiple browser instances with round-robin distribution (`--browsers N`)
+- `fetch-profiles` uses httpx fast path first, then browser fallback for failures (`--no-httpx` to disable)
+- `crawl-listings` runs practice areas in parallel (`--workers N`, default 3), with per-PA checkpoint files
 - `parse-profiles` is synchronous, single-threaded (`parse_profiles.py:41` — `for i, filename in enumerate(html_files)`)
 
 ### Bottlenecks Identified
 
-1. **Listing crawl is fully sequential** — `crawl_listings.py` iterates practice areas one by one with `await client.fetch()`. With 100+ PAs and 5-20 pages each, this phase dominates total runtime. At an average of 3.5s delay per page, 100 PAs with 10 pages each = 100 * 10 * 3.5s = **~58 minutes** just for listing crawl. Could parallelize across PAs with a semaphore (e.g., 2-3 concurrent PA crawls).
+1. ~~**Listing crawl is fully sequential**~~ **FIXED** — `crawl_listings.py` now runs practice areas in parallel via `--workers N` (default 3). Each worker writes an independent `listings_{pa_slug}.json` on completion, then a merge phase combines them with UUID dedup. Per-PA files act as natural checkpoints for resume.
 
 2. ~~**Semaphore holds during sleep**~~ **FIXED** — `asyncio.sleep()` moved before `async with self._semaphore` in `http_client.fetch()`. Concurrency slots are now only held during actual browser navigation, roughly doubling effective throughput.
 
 3. ~~**Double semaphore**~~ **FIXED** — `fetch_profiles._fetch_one()` previously acquired its own `semaphore` parameter, then called `client.fetch()` which acquires `ScraperClient._semaphore`. The redundant outer semaphore has been removed; concurrency is now managed solely by `ScraperClient`'s internal semaphore.
 
-4. **Single browser process** — Crawl4AI uses one Playwright browser. At `MAX_CONCURRENT=3`, this is fine, but scaling beyond ~5 concurrent tabs on a single browser process causes memory pressure and flaky behavior (tab crashes, timeouts).
+4. ~~**Single browser process**~~ **FIXED** — `ScraperPool` in `http_client.py` manages multiple browser instances with round-robin distribution. Controlled via `--browsers N` on `fetch-profiles`. Total max concurrency is `num_browsers * tabs_per_browser`.
 
 5. **parse_profiles is synchronous** — HTML parsing with BeautifulSoup/lxml is CPU-bound. For 2000+ profiles, the sequential loop in `parse_profiles.py:41` could benefit from `concurrent.futures.ProcessPoolExecutor` or batch processing. However, for typical city sizes (500-2000 profiles), this is likely acceptable (<60s).
 
@@ -134,8 +138,8 @@ tests/fixtures/               Saved HTML from real scraping runs
 |----------|--------|--------|--------|
 | ~~Short-term~~ | ~~Move `asyncio.sleep()` before semaphore acquire in `fetch()`~~ | ~~~2x throughput~~ | **DONE** |
 | ~~Short-term~~ | ~~Remove outer semaphore in `_fetch_one`, use only `ScraperClient`'s~~ | ~~Clarity, avoid bugs~~ | **DONE** |
-| Short-term | Add inter-PA parallelism to `crawl_listings.py` (2-3 concurrent PAs) | ~2-3x faster listing phase | Medium |
-| Medium-term | Support `--workers N` to spawn N browser contexts for profile fetching | Linear throughput scaling | Medium |
+| ~~Short-term~~ | ~~Add inter-PA parallelism to `crawl_listings.py` (2-3 concurrent PAs)~~ | ~~2-3x faster listing phase~~ | **DONE** (`--workers N`) |
+| ~~Medium-term~~ | ~~Support `--browsers N` to spawn N browser contexts for profile fetching~~ | ~~Linear throughput scaling~~ | **DONE** (`ScraperPool`) |
 | Long-term | UUID-range partitioning for multi-machine runs | Horizontal scaling | High |
 
 ---
@@ -175,19 +179,21 @@ tests/fixtures/               Saved HTML from real scraping runs
 
 | Component | Test File | Tests | Assessment |
 |-----------|----------|------:|------------|
-| discover | `test_discover.py` | 19 | Good — location parsing, PA extraction |
-| crawl_listings | `test_crawl_listings.py` | 8 | Good — atomic writes, checkpoint/resume, force flag |
-| fetch_profiles | `test_fetch_profiles.py` | 8 | Good — idempotency, force, retry-cf, status tracking, error handling |
-| http_client | `test_http_client.py` | 15 | Good — proxy, CF detection (markers + headers), fetch flow, retry, semaphore ordering, lifecycle |
-| listing_parser | `test_listing_parser.py` | 19 | Good — rich + compact cards |
 | profile_parser | `test_profile_parser.py` | 59 | Excellent — all 33 fields, multiple tiers |
+| http_client | `test_http_client.py` | 37 | Excellent — proxy, CF detection, fetch flow, retry, ScraperPool, lifecycle |
+| cli | `test_cli.py` | 28 | Good — argparse, subcommand dispatch, all flags |
+| crawl_listings | `test_crawl_listings.py` | 22 | Good — atomic writes, checkpoint/resume, force flag, parallel workers |
+| discover | `test_discover.py` | 19 | Good — location parsing, PA extraction |
+| listing_parser | `test_listing_parser.py` | 19 | Good — rich + compact cards |
+| fetch_profiles | `test_fetch_profiles.py` | 17 | Good — idempotency, force, retry-cf, httpx fast path, browser fallback |
+| models | `test_models.py` | 12 | Good — dataclass, tier inference, completeness |
+| log_setup | `test_log_setup.py` | 11 | Good — console + file handlers, verbose flag |
+| progress | `test_progress.py` | 9 | Good — CrawlProgress, FetchProgress, ETA, env var disable |
+| export | `test_export.py` | 8 | Good — cleaning, CSV output |
 | address_parser | `test_address_parser.py` | 6 | Adequate |
 | parse_profiles | `test_parse_profiles.py` | 5 | Minimal — merge + CF skip only |
-| export | `test_export.py` | 8 | Good — cleaning, CSV output |
-| models | `test_models.py` | 12 | Good — dataclass, tier inference, completeness |
-| cli | `test_cli.py` | 22 | Good — argparse, subcommand dispatch, --force flag |
 | **Integration** | **None** | 0 | **No end-to-end pipeline test** |
-| **Total** | 11 files | **185** | |
+| **Total** | **13 files** | **252** | |
 
 ### Critical Gaps
 
@@ -211,7 +217,7 @@ tests/fixtures/               Saved HTML from real scraping runs
 | UA rotation | `fake-useragent` pool | None (Crawl4AI's default Chromium UA) | **Negative** — single UA is a fingerprint |
 | Cloudflare handling | Not mentioned in design | `is_cloudflare_challenge()` + retry + `--retry-cf` CLI flag | New capability, addresses real-world block |
 | Compact listing cards | Not specified | Dual parser (rich + compact card formats) | Enhancement — handles more page layouts |
-| spike.py headers | Documented with full `Sec-Fetch-*` set | Not ported to `ScraperClient` | Missed opportunity — headers would strengthen stealth |
+| spike.py headers | Documented with full `Sec-Fetch-*` set | ~~Not ported~~ **FIXED** — `_BROWSER_HEADERS` in `http_client.py` | Now consistent with spike.py |
 | Full pipeline runner | Not specified | `main.py` chains all 5 phases | Enhancement — convenience for single-city runs |
 | Browser profile persistence | Not specified | `use_persistent_context=True` + `user_data_dir` | Enhancement — retains CF clearance cookies |
 | `fake-useragent` dependency | In tech stack | Not in `requirements.txt`, not imported | Design doc stale — dependency was dropped with httpx |
@@ -240,7 +246,7 @@ tests/fixtures/               Saved HTML from real scraping runs
 
 ### P2 — Nice to Have
 
-8. **Parallelize listing crawl** — Use `asyncio.gather` with bounded concurrency (2-3) for practice area iteration in `crawl_listings.py`. This could reduce listing phase runtime by 2-3x.
+8. ~~**Parallelize listing crawl**~~ **DONE** — `crawl_listings.py` now uses `--workers N` (default 3) for parallel PA crawling with per-PA checkpoint files.
 
 9. **Fix lost UUID on gather exception** — In `fetch_profiles.py`, wrap each `_fetch_one` call in a try/except that returns `(uuid, "error")` instead of letting bare exceptions escape.
 
@@ -250,6 +256,6 @@ tests/fixtures/               Saved HTML from real scraping runs
 
 11. **CAPTCHA solver integration** — 2captcha or CapSolver for Turnstile/hCaptcha challenges. Only needed if Cloudflare escalates beyond JS challenges.
 
-12. **Multi-browser scaling** — Support multiple Playwright browser contexts (not separate browser processes) for higher throughput. Controlled via `--workers N` flag.
+12. ~~**Multi-browser scaling**~~ **DONE** — `ScraperPool` in `http_client.py` manages multiple browser instances with round-robin distribution. Controlled via `--browsers N` on `fetch-profiles`.
 
 13. **Integration test** — A single end-to-end test using mocked fixtures that chains discover → crawl-listings → fetch-profiles → parse-profiles → export would catch phase interface mismatches.

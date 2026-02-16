@@ -52,7 +52,7 @@ python cli.py export data/austin_tx/records.json
 |---------|-------|--------|---------------|
 | discover | "City, ST" | practice_areas.json | |
 | crawl-listings | practice_areas.json | listings.json | `--workers`, `--practice-areas`, `--max-results`, `--force` |
-| fetch-profiles | listings.json | html/{uuid}.html files | `--force`, `--retry-cf` |
+| fetch-profiles | listings.json | html/{uuid}.html files | `--force`, `--retry-cf`, `--browsers`, `--delay`, `--page-wait`, `--no-httpx` |
 | parse-profiles | html/ dir + listings.json | records.json | |
 | export | records.json | .csv file | `-o` output dir |
 
@@ -100,6 +100,26 @@ Disable progress bars (e.g. for CI or piped output):
 SUPERLAWYERS_NO_PROGRESS=1 python cli.py crawl-listings data/los-angeles_ca/practice_areas.json
 ```
 
+## Profile Fetching
+
+`fetch-profiles` uses a two-phase approach: httpx first (fast, lightweight), then Crawl4AI browser fallback for failures. `ScraperPool` manages multiple browser instances with round-robin distribution.
+
+```bash
+# Tune performance: 3 browser instances, faster delays, shorter page wait
+python cli.py fetch-profiles --browsers 3 --delay 1.0,3.0 --page-wait 1.5 data/los-angeles_ca/listings.json
+
+# Skip httpx fast path, use browser for all profiles
+python cli.py fetch-profiles --no-httpx data/los-angeles_ca/listings.json
+```
+
+## Full Pipeline Shortcut
+
+Run all 5 phases in sequence for a single city:
+
+```bash
+python main.py "Los Angeles, CA"
+```
+
 ## Re-parsing without re-fetching
 
 If you need to fix a parser selector, you don't need to re-download anything:
@@ -113,6 +133,7 @@ python cli.py export data/los-angeles_ca/records.json
 
 - Stealth browser headers (`Sec-Fetch-*`, `Accept-Language`) sent with every request
 - Cloudflare challenge detection (7 HTML markers + `cf-mitigated` response header) with automatic retry
+- Proxy support via `PROXY_URL` env var (e.g. Bright Data residential proxy)
 - Use `--retry-cf` on `fetch-profiles` to selectively re-download blocked pages
 
 ## Running tests

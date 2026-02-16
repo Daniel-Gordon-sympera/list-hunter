@@ -1,5 +1,5 @@
 # tests/test_crawl_listings.py
-"""Tests for crawl_listings: parallel crawling, PA filter, max results, resume."""
+"""Tests for crawl_listings: parallel crawling, PA filter, max results, resume, httpx fast path."""
 
 import json
 import os
@@ -12,6 +12,7 @@ from commands.crawl_listings import (
     _atomic_write,
     _cleanup_pa_files,
     _find_completed_pa_files,
+    _httpx_fetch_listing_page,
     _merge_pa_files,
     run,
 )
@@ -80,13 +81,13 @@ def _make_card(uuid, name="Test Attorney"):
     return card
 
 
-def _mock_scraper_client(fake_fetch):
-    """Build a mock ScraperClient that uses the given fake_fetch function."""
-    mock_client = AsyncMock()
-    mock_client.fetch = fake_fetch
-    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-    mock_client.__aexit__ = AsyncMock(return_value=False)
-    return mock_client
+def _mock_scraper_pool(fake_fetch):
+    """Build a mock ScraperPool that uses the given fake_fetch function."""
+    mock_pool = AsyncMock()
+    mock_pool.fetch = fake_fetch
+    mock_pool.__aenter__ = AsyncMock(return_value=mock_pool)
+    mock_pool.__aexit__ = AsyncMock(return_value=False)
+    return mock_pool
 
 
 # ---------------------------------------------------------------------------
@@ -220,11 +221,11 @@ class TestPaFilter:
                 return "<html>page</html>"
             return None
 
-        mock_client = _mock_scraper_client(fake_fetch)
+        mock_pool = _mock_scraper_pool(fake_fetch)
 
-        with patch("commands.crawl_listings.ScraperClient", return_value=mock_client), \
+        with patch("commands.crawl_listings.ScraperPool", return_value=mock_pool), \
              patch("commands.crawl_listings.parse_listing_page", return_value=[_make_card("uuid-1")]):
-            await run(pa_path, pa_filter=["family-law", "tax-law"])
+            await run(pa_path, pa_filter=["family-law", "tax-law"], no_httpx=True)
 
         # criminal-defense should NOT appear
         assert not any("criminal-defense" in u for u in fetched_urls)
@@ -241,12 +242,12 @@ class TestPaFilter:
                 return "<html>page</html>"
             return None
 
-        mock_client = _mock_scraper_client(fake_fetch)
+        mock_pool = _mock_scraper_pool(fake_fetch)
 
-        with patch("commands.crawl_listings.ScraperClient", return_value=mock_client), \
+        with patch("commands.crawl_listings.ScraperPool", return_value=mock_pool), \
              patch("commands.crawl_listings.parse_listing_page", return_value=[_make_card("uuid-1")]), \
              patch("commands.crawl_listings.log") as mock_log:
-            await run(pa_path, pa_filter=["family-law", "nonexistent-law"])
+            await run(pa_path, pa_filter=["family-law", "nonexistent-law"], no_httpx=True)
             mock_log.warning.assert_any_call(
                 "Unknown practice area slugs (ignored): %s", ["nonexistent-law"]
             )
@@ -270,11 +271,11 @@ class TestMaxResults:
                 return "<html>page</html>"
             return None
 
-        mock_client = _mock_scraper_client(fake_fetch)
+        mock_pool = _mock_scraper_pool(fake_fetch)
 
-        with patch("commands.crawl_listings.ScraperClient", return_value=mock_client), \
+        with patch("commands.crawl_listings.ScraperPool", return_value=mock_pool), \
              patch("commands.crawl_listings.parse_listing_page", return_value=cards):
-            result = await run(pa_path, max_results=5)
+            result = await run(pa_path, max_results=5, no_httpx=True)
 
         with open(result, encoding="utf-8") as f:
             records = json.load(f)
@@ -292,11 +293,11 @@ class TestMaxResults:
                 return "<html>page</html>"
             return None
 
-        mock_client = _mock_scraper_client(fake_fetch)
+        mock_pool = _mock_scraper_pool(fake_fetch)
 
-        with patch("commands.crawl_listings.ScraperClient", return_value=mock_client), \
+        with patch("commands.crawl_listings.ScraperPool", return_value=mock_pool), \
              patch("commands.crawl_listings.parse_listing_page", return_value=cards):
-            result = await run(pa_path, max_results=None)
+            result = await run(pa_path, max_results=None, no_httpx=True)
 
         with open(result, encoding="utf-8") as f:
             records = json.load(f)
@@ -331,11 +332,11 @@ class TestParallelCrawling:
                     return cards
             return []
 
-        mock_client = _mock_scraper_client(fake_fetch)
+        mock_pool = _mock_scraper_pool(fake_fetch)
 
-        with patch("commands.crawl_listings.ScraperClient", return_value=mock_client), \
+        with patch("commands.crawl_listings.ScraperPool", return_value=mock_pool), \
              patch("commands.crawl_listings.parse_listing_page", side_effect=fake_parse):
-            result = await run(pa_path, workers=2)
+            result = await run(pa_path, workers=2, no_httpx=True)
 
         with open(result, encoding="utf-8") as f:
             records = json.load(f)
@@ -352,11 +353,11 @@ class TestParallelCrawling:
                 return "<html>page</html>"
             return None
 
-        mock_client = _mock_scraper_client(fake_fetch)
+        mock_pool = _mock_scraper_pool(fake_fetch)
 
-        with patch("commands.crawl_listings.ScraperClient", return_value=mock_client), \
+        with patch("commands.crawl_listings.ScraperPool", return_value=mock_pool), \
              patch("commands.crawl_listings.parse_listing_page", return_value=[_make_card("uuid-1")]):
-            await run(pa_path)
+            await run(pa_path, no_httpx=True)
 
         # Per-PA file should be cleaned up
         assert not (tmp_path / "listings_family-law.json").exists()
@@ -389,11 +390,11 @@ class TestResume:
                 return "<html>criminal-defense</html>"
             return None
 
-        mock_client = _mock_scraper_client(fake_fetch)
+        mock_pool = _mock_scraper_pool(fake_fetch)
 
-        with patch("commands.crawl_listings.ScraperClient", return_value=mock_client), \
+        with patch("commands.crawl_listings.ScraperPool", return_value=mock_pool), \
              patch("commands.crawl_listings.parse_listing_page", return_value=[_make_card("uuid-2")]):
-            result = await run(pa_path)
+            result = await run(pa_path, no_httpx=True)
 
         # family-law should NOT have been fetched
         assert not any("family-law" in u for u in fetched_urls)
@@ -424,11 +425,11 @@ class TestResume:
                 return "<html>page</html>"
             return None
 
-        mock_client = _mock_scraper_client(fake_fetch)
+        mock_pool = _mock_scraper_pool(fake_fetch)
 
-        with patch("commands.crawl_listings.ScraperClient", return_value=mock_client), \
+        with patch("commands.crawl_listings.ScraperPool", return_value=mock_pool), \
              patch("commands.crawl_listings.parse_listing_page", return_value=[_make_card("uuid-new")]):
-            result = await run(pa_path, force=True)
+            result = await run(pa_path, force=True, no_httpx=True)
 
         # Should have re-crawled family-law
         assert any("family-law" in u for u in fetched_urls)
@@ -452,11 +453,11 @@ class TestResume:
                 return "<html>tax-law</html>"
             return None
 
-        mock_client = _mock_scraper_client(fake_fetch)
+        mock_pool = _mock_scraper_pool(fake_fetch)
 
-        with patch("commands.crawl_listings.ScraperClient", return_value=mock_client), \
+        with patch("commands.crawl_listings.ScraperPool", return_value=mock_pool), \
              patch("commands.crawl_listings.parse_listing_page", return_value=[_make_card("uuid-t")]):
-            await run(pa_path)
+            await run(pa_path, no_httpx=True)
 
         assert not (tmp_path / "crawl_progress.json").exists()
 
@@ -480,13 +481,233 @@ class TestDeduplication:
                 return "<html>page</html>"
             return None
 
-        mock_client = _mock_scraper_client(fake_fetch)
+        mock_pool = _mock_scraper_pool(fake_fetch)
 
-        with patch("commands.crawl_listings.ScraperClient", return_value=mock_client), \
+        with patch("commands.crawl_listings.ScraperPool", return_value=mock_pool), \
              patch("commands.crawl_listings.parse_listing_page", return_value=[shared_card]):
-            result = await run(pa_path, workers=2)
+            result = await run(pa_path, workers=2, no_httpx=True)
 
         with open(result, encoding="utf-8") as f:
             records = json.load(f)
         assert len(records) == 1
         assert "uuid-shared" in records
+
+
+# ---------------------------------------------------------------------------
+# _httpx_fetch_listing_page tests
+# ---------------------------------------------------------------------------
+
+
+class TestHttpxFetchListingPage:
+    @pytest.mark.asyncio
+    async def test_success_returns_html(self):
+        """Successful httpx fetch returns (html, 'success')."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "<html><body>listing page</body></html>"
+        mock_response.headers = {}
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        html, status = await _httpx_fetch_listing_page(
+            mock_client, "https://example.com/page", referer="https://example.com/",
+        )
+        assert status == "success"
+        assert html == "<html><body>listing page</body></html>"
+        # Verify referer header was passed
+        mock_client.get.assert_awaited_once_with(
+            "https://example.com/page",
+            headers={"Referer": "https://example.com/"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_cf_blocked_returns_none(self):
+        """CF challenge response returns (None, 'cf_blocked')."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "<html><title>Just a moment...</title></html>"
+        mock_response.headers = {}
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        html, status = await _httpx_fetch_listing_page(mock_client, "https://example.com/page")
+        assert status == "cf_blocked"
+        assert html is None
+
+    @pytest.mark.asyncio
+    async def test_cf_header_detected(self):
+        """CF mitigation header triggers cf_blocked."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "<html><body>normal</body></html>"
+        mock_response.headers = {"cf-mitigated": "challenge"}
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        html, status = await _httpx_fetch_listing_page(mock_client, "https://example.com/page")
+        assert status == "cf_blocked"
+        assert html is None
+
+    @pytest.mark.asyncio
+    async def test_404_returns_failed(self):
+        """404 response returns (None, 'failed')."""
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+        mock_response.text = "Not found"
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        html, status = await _httpx_fetch_listing_page(mock_client, "https://example.com/page")
+        assert status == "failed"
+        assert html is None
+
+    @pytest.mark.asyncio
+    async def test_500_returns_failed(self):
+        """Server error returns (None, 'failed')."""
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.text = "Internal Server Error"
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        html, status = await _httpx_fetch_listing_page(mock_client, "https://example.com/page")
+        assert status == "failed"
+        assert html is None
+
+    @pytest.mark.asyncio
+    async def test_exception_returns_failed(self):
+        """Network exception returns (None, 'failed')."""
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=Exception("Connection refused"))
+
+        html, status = await _httpx_fetch_listing_page(mock_client, "https://example.com/page")
+        assert status == "failed"
+        assert html is None
+
+    @pytest.mark.asyncio
+    async def test_no_referer_sends_empty_headers(self):
+        """When no referer is given, no Referer header is sent."""
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.text = "<html>ok</html>"
+        mock_response.headers = {}
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+
+        await _httpx_fetch_listing_page(mock_client, "https://example.com/page")
+        mock_client.get.assert_awaited_once_with(
+            "https://example.com/page",
+            headers={},
+        )
+
+
+# ---------------------------------------------------------------------------
+# httpx Fast Path integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestHttpxFastPath:
+    @pytest.mark.asyncio
+    async def test_httpx_success_skips_browser(self, tmp_path):
+        """When httpx succeeds, browser should not be called."""
+        pa_path = _make_discovery(tmp_path, ["family-law"])
+
+        browser_urls = []
+
+        async def fake_browser_fetch(url, referer=None):
+            browser_urls.append(url)
+            return "<html>browser</html>"
+
+        mock_pool = _mock_scraper_pool(fake_browser_fetch)
+
+        async def fake_httpx_fetch(client, url, referer=None):
+            if "page=1" in url:
+                return "<html>family-law httpx</html>", "success"
+            return None, "failed"
+
+        with patch("commands.crawl_listings.ScraperPool", return_value=mock_pool), \
+             patch("commands.crawl_listings._httpx_fetch_listing_page", side_effect=fake_httpx_fetch), \
+             patch("commands.crawl_listings.parse_listing_page", return_value=[_make_card("uuid-1")]), \
+             patch("commands.crawl_listings.httpx") as mock_httpx:
+            # Set up the httpx.AsyncClient mock
+            mock_httpx_client = AsyncMock()
+            mock_httpx_cm = MagicMock()
+            mock_httpx_cm.__aenter__ = AsyncMock(return_value=mock_httpx_client)
+            mock_httpx_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_httpx.AsyncClient.return_value = mock_httpx_cm
+
+            result = await run(pa_path, no_httpx=False)
+
+        # Browser should not have been called for page 1 (httpx succeeded)
+        assert not any("page=1" in u for u in browser_urls)
+
+        with open(result, encoding="utf-8") as f:
+            records = json.load(f)
+        assert "uuid-1" in records
+
+    @pytest.mark.asyncio
+    async def test_cf_blocked_falls_back_to_browser(self, tmp_path):
+        """When httpx returns cf_blocked, browser fallback should be used."""
+        pa_path = _make_discovery(tmp_path, ["family-law"])
+
+        browser_urls = []
+
+        async def fake_browser_fetch(url, referer=None):
+            browser_urls.append(url)
+            if "page=1" in url:
+                return "<html>browser page</html>"
+            return None
+
+        mock_pool = _mock_scraper_pool(fake_browser_fetch)
+
+        async def fake_httpx_fetch(client, url, referer=None):
+            return None, "cf_blocked"
+
+        with patch("commands.crawl_listings.ScraperPool", return_value=mock_pool), \
+             patch("commands.crawl_listings._httpx_fetch_listing_page", side_effect=fake_httpx_fetch), \
+             patch("commands.crawl_listings.parse_listing_page", return_value=[_make_card("uuid-1")]), \
+             patch("commands.crawl_listings.httpx") as mock_httpx:
+            mock_httpx_client = AsyncMock()
+            mock_httpx_cm = MagicMock()
+            mock_httpx_cm.__aenter__ = AsyncMock(return_value=mock_httpx_client)
+            mock_httpx_cm.__aexit__ = AsyncMock(return_value=False)
+            mock_httpx.AsyncClient.return_value = mock_httpx_cm
+
+            result = await run(pa_path, no_httpx=False)
+
+        # Browser SHOULD have been called as fallback
+        assert any("page=1" in u for u in browser_urls)
+
+        with open(result, encoding="utf-8") as f:
+            records = json.load(f)
+        assert "uuid-1" in records
+
+    @pytest.mark.asyncio
+    async def test_no_httpx_skips_httpx(self, tmp_path):
+        """With no_httpx=True, httpx should not be used at all."""
+        pa_path = _make_discovery(tmp_path, ["family-law"])
+
+        async def fake_fetch(url, referer=None):
+            if "page=1" in url:
+                return "<html>page</html>"
+            return None
+
+        mock_pool = _mock_scraper_pool(fake_fetch)
+
+        with patch("commands.crawl_listings.ScraperPool", return_value=mock_pool), \
+             patch("commands.crawl_listings.parse_listing_page", return_value=[_make_card("uuid-1")]), \
+             patch("commands.crawl_listings._httpx_fetch_listing_page") as mock_httpx_fetch:
+            result = await run(pa_path, no_httpx=True)
+
+        # _httpx_fetch_listing_page should never have been called
+        mock_httpx_fetch.assert_not_called()
+
+        with open(result, encoding="utf-8") as f:
+            records = json.load(f)
+        assert "uuid-1" in records

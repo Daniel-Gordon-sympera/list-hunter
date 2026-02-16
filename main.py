@@ -30,6 +30,10 @@ async def run_pipeline(
     fetch_delay: tuple[float, float] | None = None,
     fetch_page_wait: float | None = None,
     fetch_no_httpx: bool = False,
+    crawl_browsers: int = 1,
+    crawl_delay: tuple[float, float] | None = None,
+    crawl_page_wait: float | None = None,
+    crawl_no_httpx: bool = False,
 ) -> str:
     """Chain all five scraper phases and return the path to the final CSV.
 
@@ -44,6 +48,10 @@ async def run_pipeline(
         fetch_delay: (min, max) inter-request delay for fetch-profiles.
         fetch_page_wait: JS wait after page load for fetch-profiles.
         fetch_no_httpx: Skip httpx sweep, use browser for all requests.
+        crawl_browsers: Number of browser instances for crawl-listings fallback.
+        crawl_delay: (min, max) inter-request delay for crawl-listings browser.
+        crawl_page_wait: JS wait after page load for crawl-listings browser.
+        crawl_no_httpx: Skip httpx fast path for crawl-listings.
 
     Returns:
         Path to the exported CSV file.
@@ -65,6 +73,10 @@ async def run_pipeline(
         workers=workers,
         pa_filter=pa_filter,
         max_results=max_results,
+        browsers=crawl_browsers,
+        delay=crawl_delay,
+        page_wait=crawl_page_wait,
+        no_httpx=crawl_no_httpx,
     )
 
     # Phase 4a: Fetch profile HTML
