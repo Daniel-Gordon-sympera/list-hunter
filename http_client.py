@@ -87,15 +87,23 @@ class ScraperClient:
     each request to avoid hammering the server.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        max_concurrent: int | None = None,
+        delay_min: float | None = None,
+        delay_max: float | None = None,
+        page_wait: float | None = None,
+    ) -> None:
         self._crawler: AsyncWebCrawler | None = None
-        self._semaphore = asyncio.Semaphore(config.MAX_CONCURRENT)
+        self._semaphore = asyncio.Semaphore(max_concurrent or config.MAX_CONCURRENT)
+        self._delay_min = delay_min if delay_min is not None else config.DELAY_MIN
+        self._delay_max = delay_max if delay_max is not None else config.DELAY_MAX
 
         os.makedirs(config.BROWSER_PROFILE_DIR, exist_ok=True)
 
         proxy_config = None
         if config.PROXY_URL:
-            proxy_server = f"{config.PROXY_SERVER}:{config.PROXY_PORT}"
+            proxy_server = f"http://{config.PROXY_SERVER}:{config.PROXY_PORT}"
             proxy_username = config.PROXY_USERNAME
             proxy_password = config.PROXY_PASSWORD
             proxy_config = ProxyConfig(
@@ -104,20 +112,29 @@ class ScraperClient:
                 password=proxy_password,
             )
 
+        # Disable persistent context when using a proxy. With persistent
+        # context, Crawl4AI forces managed-browser mode which injects proxy
+        # credentials into the --proxy-server CLI flag (broken). Without it,
+        # Crawl4AI uses Playwright's ProxySettings dict which handles 407 auth
+        # correctly.
+        use_persistent = not bool(config.PROXY_URL)
+
         self._browser_config = BrowserConfig(
             headless=True,
             verbose=False,
             enable_stealth=True,
-            use_persistent_context=True,
-            user_data_dir=os.path.abspath(config.BROWSER_PROFILE_DIR),
+            use_persistent_context=use_persistent,
+            user_data_dir=os.path.abspath(config.BROWSER_PROFILE_DIR) if use_persistent else None,
             extra_args=["--disable-blink-features=AutomationControlled"],
             headers=_BROWSER_HEADERS,
             proxy_config=proxy_config,
         )
+
+        actual_page_wait = page_wait if page_wait is not None else config.DELAY_BEFORE_RETURN
         self._run_config = CrawlerRunConfig(
             cache_mode=CacheMode.DISABLED,
             page_timeout=config.REQUEST_TIMEOUT * 1000,  # ms
-            delay_before_return_html=config.DELAY_BEFORE_RETURN,
+            delay_before_return_html=actual_page_wait,
             override_navigator=True,
         )
 
@@ -157,7 +174,7 @@ class ScraperClient:
             or all retries were exhausted.
         """
         # Rate-limit: random sleep before acquiring a concurrency slot
-        delay = random.uniform(config.DELAY_MIN, config.DELAY_MAX)
+        delay = random.uniform(self._delay_min, self._delay_max)
         logger.debug("Sleeping %.1fs before request to %s", delay, url)
         await asyncio.sleep(delay)
 

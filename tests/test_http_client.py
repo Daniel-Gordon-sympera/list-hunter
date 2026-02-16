@@ -48,14 +48,20 @@ def _make_mock_crawler(result):
 
 class TestProxyConfig:
     def test_no_proxy_when_env_unset(self):
-        """No proxy_config when PROXY_URL is None."""
+        """No proxy_config when PROXY_URL is None; persistent context enabled."""
         with patch.object(config, "PROXY_URL", None):
             client = ScraperClient()
             assert client._browser_config.proxy_config is None
+            assert client._browser_config.use_persistent_context is True
+            assert client._browser_config.user_data_dir is not None
 
     def test_proxy_configured_when_env_set(self):
         """proxy_config wired to BrowserConfig when PROXY_URL is set."""
-        with patch.object(config, "PROXY_URL", "http://user:pass@proxy.example.com:8080"):
+        with patch.object(config, "PROXY_URL", "http://user:pass@proxy.example.com:8080"), \
+             patch.object(config, "PROXY_SERVER", "proxy.example.com"), \
+             patch.object(config, "PROXY_PORT", "8080"), \
+             patch.object(config, "PROXY_USERNAME", "user"), \
+             patch.object(config, "PROXY_PASSWORD", "pass"):
             client = ScraperClient()
             pc = client._browser_config.proxy_config
             assert isinstance(pc, ProxyConfig)
@@ -63,15 +69,74 @@ class TestProxyConfig:
             assert pc.username == "user"
             assert pc.password == "pass"
 
+    def test_persistent_context_disabled_with_proxy(self):
+        """Persistent context must be off when proxy is configured to avoid ERR_NO_SUPPORTED_PROXIES."""
+        with patch.object(config, "PROXY_URL", "http://user:pass@proxy.example.com:8080"), \
+             patch.object(config, "PROXY_SERVER", "proxy.example.com"), \
+             patch.object(config, "PROXY_PORT", "8080"), \
+             patch.object(config, "PROXY_USERNAME", "user"), \
+             patch.object(config, "PROXY_PASSWORD", "pass"):
+            client = ScraperClient()
+            assert client._browser_config.use_persistent_context is False
+            assert client._browser_config.user_data_dir is None
+
     def test_brightdata_proxy_format_parsed(self):
         """Bright Data residential proxy URL parses correctly."""
         url = "http://brd-customer-hl_1a29887d-zone-residential_proxy1:pi63dagbslkk@brd.superproxy.io:33335"
-        with patch.object(config, "PROXY_URL", url):
+        with patch.object(config, "PROXY_URL", url), \
+             patch.object(config, "PROXY_SERVER", "brd.superproxy.io"), \
+             patch.object(config, "PROXY_PORT", "33335"), \
+             patch.object(config, "PROXY_USERNAME", "brd-customer-hl_1a29887d-zone-residential_proxy1"), \
+             patch.object(config, "PROXY_PASSWORD", "pi63dagbslkk"):
             client = ScraperClient()
             pc = client._browser_config.proxy_config
             assert pc.server == "http://brd.superproxy.io:33335"
             assert pc.username == "brd-customer-hl_1a29887d-zone-residential_proxy1"
             assert pc.password == "pi63dagbslkk"
+
+
+# ---------------------------------------------------------------------------
+# ScraperClient parameter tests
+# ---------------------------------------------------------------------------
+
+class TestScraperClientParams:
+    def test_default_semaphore_uses_config(self):
+        """Default ScraperClient uses config.MAX_CONCURRENT for semaphore."""
+        with patch.object(config, "PROXY_URL", None):
+            client = ScraperClient()
+            assert client._semaphore._value == config.MAX_CONCURRENT
+
+    def test_custom_max_concurrent(self):
+        """max_concurrent overrides config.MAX_CONCURRENT."""
+        with patch.object(config, "PROXY_URL", None):
+            client = ScraperClient(max_concurrent=7)
+            assert client._semaphore._value == 7
+
+    def test_default_delays_use_config(self):
+        """Default ScraperClient uses config delay values."""
+        with patch.object(config, "PROXY_URL", None):
+            client = ScraperClient()
+            assert client._delay_min == config.DELAY_MIN
+            assert client._delay_max == config.DELAY_MAX
+
+    def test_custom_delays(self):
+        """Custom delay_min/delay_max override config values."""
+        with patch.object(config, "PROXY_URL", None):
+            client = ScraperClient(delay_min=0.5, delay_max=1.5)
+            assert client._delay_min == 0.5
+            assert client._delay_max == 1.5
+
+    def test_default_page_wait_uses_config(self):
+        """Default ScraperClient uses config.DELAY_BEFORE_RETURN for page_wait."""
+        with patch.object(config, "PROXY_URL", None):
+            client = ScraperClient()
+            assert client._run_config.delay_before_return_html == config.DELAY_BEFORE_RETURN
+
+    def test_custom_page_wait(self):
+        """Custom page_wait overrides delay_before_return_html."""
+        with patch.object(config, "PROXY_URL", None):
+            client = ScraperClient(page_wait=0.5)
+            assert client._run_config.delay_before_return_html == 0.5
 
 
 # ---------------------------------------------------------------------------
