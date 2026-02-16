@@ -256,3 +256,58 @@ class ScraperClient:
         error_msg = result.error_message or f"HTTP {status}"
         logger.warning("Fetch failed for %s: %s", url, error_msg)
         raise FetchError(error_msg, status_code=status)
+
+
+class ScraperPool:
+    """Manages multiple browser instances for parallel fetching.
+
+    Distributes requests round-robin across N ScraperClient instances,
+    each owning its own Chromium browser process.  Total max concurrency
+    is num_browsers * tabs_per_browser.
+
+    Usage:
+        async with ScraperPool(num_browsers=5) as pool:
+            html = await pool.fetch("https://...")
+    """
+
+    def __init__(
+        self,
+        num_browsers: int = 1,
+        tabs_per_browser: int | None = None,
+        delay_min: float | None = None,
+        delay_max: float | None = None,
+        page_wait: float | None = None,
+    ) -> None:
+        tabs = tabs_per_browser or config.MAX_CONCURRENT
+        self._clients = [
+            ScraperClient(
+                max_concurrent=tabs,
+                delay_min=delay_min,
+                delay_max=delay_max,
+                page_wait=page_wait,
+            )
+            for _ in range(num_browsers)
+        ]
+        self._index = 0
+
+    async def __aenter__(self) -> ScraperPool:
+        for client in self._clients:
+            await client.__aenter__()
+        logger.info("ScraperPool started: %d browser(s)", len(self._clients))
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
+        for client in self._clients:
+            await client.__aexit__(exc_type, exc_val, exc_tb)
+        logger.info("ScraperPool closed: %d browser(s)", len(self._clients))
+
+    async def fetch(self, url: str, *, referer: str | None = None) -> Optional[str]:
+        """Fetch a URL using the next browser in round-robin order."""
+        client = self._clients[self._index % len(self._clients)]
+        self._index += 1
+        return await client.fetch(url, referer=referer)

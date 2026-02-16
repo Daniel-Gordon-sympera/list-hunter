@@ -11,6 +11,7 @@ import config
 from http_client import (
     FetchError,
     ScraperClient,
+    ScraperPool,
     is_cloudflare_challenge,
     is_cloudflare_challenge_response,
     _CLOUDFLARE_MARKERS,
@@ -337,3 +338,81 @@ class TestContextManagerLifecycle:
             await client.__aexit__(None, None, None)
             assert client._crawler is None
             mock_crawler.__aexit__.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# ScraperPool tests
+# ---------------------------------------------------------------------------
+
+class TestScraperPool:
+    @pytest.mark.asyncio
+    async def test_pool_creates_n_clients(self):
+        """ScraperPool creates num_browsers ScraperClient instances."""
+        with patch("http_client.AsyncWebCrawler") as MockCrawler:
+            mock_instance = AsyncMock()
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            MockCrawler.return_value = mock_instance
+
+            pool = ScraperPool(num_browsers=3)
+            assert len(pool._clients) == 3
+
+    @pytest.mark.asyncio
+    async def test_pool_round_robins_fetch(self):
+        """Fetch calls distribute across clients round-robin."""
+        result = _make_crawl_result(html="<html>ok</html>")
+        mock_crawler = _make_mock_crawler(result)
+
+        with patch("http_client.AsyncWebCrawler", return_value=mock_crawler), \
+             patch("http_client.asyncio.sleep", new_callable=AsyncMock):
+            async with ScraperPool(num_browsers=2) as pool:
+                await pool.fetch("https://example.com/1")
+                await pool.fetch("https://example.com/2")
+                await pool.fetch("https://example.com/3")
+
+        # Client 0 should get requests 1 and 3, client 1 gets request 2
+        assert pool._index == 3
+
+    @pytest.mark.asyncio
+    async def test_pool_aenter_starts_all_browsers(self):
+        """__aenter__ starts all browser instances."""
+        mock_crawler = AsyncMock()
+        mock_crawler.__aenter__ = AsyncMock(return_value=mock_crawler)
+        mock_crawler.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("http_client.AsyncWebCrawler", return_value=mock_crawler):
+            pool = ScraperPool(num_browsers=3)
+            await pool.__aenter__()
+
+        # AsyncWebCrawler should be instantiated 3 times
+        assert mock_crawler.__aenter__.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_pool_aexit_closes_all_browsers(self):
+        """__aexit__ closes all browser instances."""
+        mock_crawler = AsyncMock()
+        mock_crawler.__aenter__ = AsyncMock(return_value=mock_crawler)
+        mock_crawler.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("http_client.AsyncWebCrawler", return_value=mock_crawler):
+            pool = ScraperPool(num_browsers=3)
+            await pool.__aenter__()
+            await pool.__aexit__(None, None, None)
+
+        assert mock_crawler.__aexit__.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_pool_passes_params_to_clients(self):
+        """ScraperPool passes delay/page_wait params to each client."""
+        with patch.object(config, "PROXY_URL", None):
+            pool = ScraperPool(num_browsers=2, delay_min=0.5, delay_max=1.0, page_wait=0.3)
+            for client in pool._clients:
+                assert client._delay_min == 0.5
+                assert client._delay_max == 1.0
+                assert client._run_config.delay_before_return_html == 0.3
+
+    def test_pool_default_one_browser(self):
+        """Default ScraperPool creates 1 browser."""
+        with patch.object(config, "PROXY_URL", None):
+            pool = ScraperPool()
+            assert len(pool._clients) == 1
