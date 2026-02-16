@@ -2,6 +2,9 @@
 """All configuration constants for the scraper."""
 
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Proxy (set PROXY_URL env var to enable, e.g. "http://user:pass@host:port")
 PROXY_URL = os.environ.get("PROXY_URL")
@@ -38,6 +41,9 @@ MAX_CELL_LENGTH = 10_000
 STEALTH_MODE = True
 BROWSER_PROFILE_DIR = "./data/.browser_profile"
 DELAY_BEFORE_RETURN = 2.0     # seconds, let JS challenges resolve
+
+# httpx fast path
+DEFAULT_HTTPX_CONCURRENT = 30  # lightweight, can go higher than browser
 
 # Timeouts
 REQUEST_TIMEOUT = 60           # seconds
