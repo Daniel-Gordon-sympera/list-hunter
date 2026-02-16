@@ -293,6 +293,39 @@ class TestSafeExtraction:
         )
         assert record.practice_areas == "Criminal Defense, Family Law"
 
+    def test_firm_website_url_falls_back_to_parent_office(self):
+        """When no 'Visit website' link exists, use the /lawfirm/ href."""
+        html = """
+        <html><body>
+        <a class="profile-profile-header"
+           href="https://profiles.superlawyers.com/new-york/brooklyn/lawfirm/test-firm/bc2cf36e-fc72-410c-a2ed-c3e50dd09278.html">
+           Test Firm
+        </a>
+        </body></html>
+        """
+        record = parse_profile(
+            html,
+            "https://example.com/x/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.html",
+        )
+        assert record.firm_website_url == "https://profiles.superlawyers.com/new-york/brooklyn/lawfirm/test-firm/bc2cf36e-fc72-410c-a2ed-c3e50dd09278.html"
+
+    def test_firm_website_url_prefers_visit_website_over_parent_office(self):
+        """'Visit website' link takes priority over parent office URL."""
+        html = """
+        <html><body>
+        <a class="profile-profile-header"
+           href="https://profiles.superlawyers.com/state/city/lawfirm/slug/uuid.html">
+           Some Firm
+        </a>
+        <a href="https://www.example.com/firm?tracking=123">Visit website</a>
+        </body></html>
+        """
+        record = parse_profile(
+            html,
+            "https://example.com/x/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.html",
+        )
+        assert record.firm_website_url == "https://www.example.com/firm"
+
 
 CLOUDFLARE_CHALLENGE_HTML = """
 <html>

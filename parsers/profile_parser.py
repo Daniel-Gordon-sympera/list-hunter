@@ -276,6 +276,10 @@ class _ProfileParser:
         visit = self.soup.find("a", string=re.compile(r"Visit website", re.I))
         if visit and visit.get("href"):
             return visit["href"].split("?")[0]
+        # Fallback: use parent office SuperLawyers profile URL
+        firm_link = self.soup.select_one('a[href*="/lawfirm/"]')
+        if firm_link and firm_link.get("href"):
+            return firm_link["href"]
         return ""
 
     def _extract_professional_webpage(self) -> str:
