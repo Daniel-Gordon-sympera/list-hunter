@@ -42,6 +42,16 @@ class TestCrawlProgress:
         cp.stop()
 
 
+class TestFetchProgressETA:
+    def test_progress_bar_includes_eta(self):
+        """FetchProgress should include TimeRemainingColumn."""
+        fp = FetchProgress(total=100)
+        fp.start()
+        column_types = [type(c).__name__ for c in fp._progress.columns]
+        assert "TimeRemainingColumn" in column_types
+        fp.stop()
+
+
 class TestFetchProgress:
     def test_context_manager(self):
         with FetchProgress(total=100) as fp:

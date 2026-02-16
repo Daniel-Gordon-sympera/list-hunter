@@ -22,6 +22,7 @@ try:
         TaskProgressColumn,
         TextColumn,
         TimeElapsedColumn,
+        TimeRemainingColumn,
     )
 
     RICH_AVAILABLE = True
@@ -134,6 +135,7 @@ class FetchProgress:
             MofNCompleteColumn(),
             TaskProgressColumn(),
             TimeElapsedColumn(),
+            TimeRemainingColumn(),
             console=Console(stderr=True),
         )
         self._task_id = self._progress.add_task(
