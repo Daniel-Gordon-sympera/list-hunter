@@ -26,6 +26,10 @@ async def run_pipeline(
     workers: int | None = None,
     pa_filter: list[str] | None = None,
     max_results: int | None = None,
+    fetch_browsers: int = 1,
+    fetch_delay: tuple[float, float] | None = None,
+    fetch_page_wait: float | None = None,
+    fetch_no_httpx: bool = False,
 ) -> str:
     """Chain all five scraper phases and return the path to the final CSV.
 
@@ -36,6 +40,10 @@ async def run_pipeline(
         workers: Number of concurrent PA workers for crawl-listings.
         pa_filter: Optional list of PA slugs to crawl.
         max_results: Optional cap on unique attorneys to collect.
+        fetch_browsers: Number of browser instances for fetch-profiles fallback.
+        fetch_delay: (min, max) inter-request delay for fetch-profiles.
+        fetch_page_wait: JS wait after page load for fetch-profiles.
+        fetch_no_httpx: Skip httpx sweep, use browser for all requests.
 
     Returns:
         Path to the exported CSV file.
@@ -61,7 +69,13 @@ async def run_pipeline(
 
     # Phase 4a: Fetch profile HTML
     logger.info("=== Phase 4a: Fetch profiles ===")
-    data_dir = await fetch_profiles.run(listings_path)
+    data_dir = await fetch_profiles.run(
+        listings_path,
+        browsers=fetch_browsers,
+        delay=fetch_delay,
+        page_wait=fetch_page_wait,
+        no_httpx=fetch_no_httpx,
+    )
 
     # Phase 4b: Parse profiles
     logger.info("=== Phase 4b: Parse profiles ===")
