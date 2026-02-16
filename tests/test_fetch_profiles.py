@@ -30,8 +30,8 @@ def _make_listings(tmp_path, uuids):
     return str(path)
 
 
-def _mock_client(fetch_side_effect=None, fetch_return_value="<html>profile</html>"):
-    """Build a mock ScraperClient async context manager."""
+def _mock_pool(fetch_side_effect=None, fetch_return_value="<html>profile</html>"):
+    """Build a mock ScraperPool async context manager."""
     mock = AsyncMock()
     if fetch_side_effect is not None:
         mock.fetch = AsyncMock(side_effect=fetch_side_effect)
@@ -58,9 +58,9 @@ class TestIdempotency:
         html_dir.mkdir()
         (html_dir / f"{uuid}.html").write_text("<html>existing</html>", encoding="utf-8")
 
-        mock = _mock_client()
-        with patch("commands.fetch_profiles.ScraperClient", return_value=mock):
-            await run(listings_path)
+        mock = _mock_pool()
+        with patch("commands.fetch_profiles.ScraperPool", return_value=mock):
+            await run(listings_path, no_httpx=True)
 
         # Should not have called fetch
         mock.fetch.assert_not_awaited()
@@ -80,9 +80,10 @@ class TestIdempotency:
         html_dir.mkdir()
         (html_dir / f"{uuid}.html").write_text("<html>old</html>", encoding="utf-8")
 
-        mock = _mock_client(fetch_return_value="<html>new</html>")
-        with patch("commands.fetch_profiles.ScraperClient", return_value=mock):
-            await run(listings_path, force=True)
+        mock = _mock_pool(fetch_return_value="<html>new</html>")
+        with patch("commands.fetch_profiles.ScraperPool", return_value=mock), \
+             patch("commands.fetch_profiles.is_progress_enabled", return_value=False):
+            await run(listings_path, force=True, no_httpx=True)
 
         # Should have fetched
         mock.fetch.assert_awaited_once()
@@ -119,9 +120,10 @@ class TestRetryCf:
             "<html>clean profile</html>", encoding="utf-8"
         )
 
-        mock = _mock_client(fetch_return_value="<html>fresh profile</html>")
-        with patch("commands.fetch_profiles.ScraperClient", return_value=mock):
-            await run(listings_path, retry_cf=True)
+        mock = _mock_pool(fetch_return_value="<html>fresh profile</html>")
+        with patch("commands.fetch_profiles.ScraperPool", return_value=mock), \
+             patch("commands.fetch_profiles.is_progress_enabled", return_value=False):
+            await run(listings_path, retry_cf=True, no_httpx=True)
 
         # Only the CF page should have been re-fetched
         assert mock.fetch.await_count == 1
@@ -142,9 +144,10 @@ class TestFetchOutcomes:
         uuid = "new-uuid-5555-6666"
         listings_path = _make_listings(tmp_path, [uuid])
 
-        mock = _mock_client(fetch_return_value="<html>fetched</html>")
-        with patch("commands.fetch_profiles.ScraperClient", return_value=mock):
-            await run(listings_path)
+        mock = _mock_pool(fetch_return_value="<html>fetched</html>")
+        with patch("commands.fetch_profiles.ScraperPool", return_value=mock), \
+             patch("commands.fetch_profiles.is_progress_enabled", return_value=False):
+            await run(listings_path, no_httpx=True)
 
         html_path = tmp_path / "html" / f"{uuid}.html"
         assert html_path.exists()
@@ -156,9 +159,10 @@ class TestFetchOutcomes:
         uuid = "fail-uuid-7777-8888"
         listings_path = _make_listings(tmp_path, [uuid])
 
-        mock = _mock_client(fetch_return_value=None)
-        with patch("commands.fetch_profiles.ScraperClient", return_value=mock):
-            await run(listings_path)
+        mock = _mock_pool(fetch_return_value=None)
+        with patch("commands.fetch_profiles.ScraperPool", return_value=mock), \
+             patch("commands.fetch_profiles.is_progress_enabled", return_value=False):
+            await run(listings_path, no_httpx=True)
 
         statuses = json.loads((tmp_path / "fetch_status.json").read_text(encoding="utf-8"))
         assert statuses[uuid] == "failed"
@@ -178,9 +182,10 @@ class TestFetchOutcomes:
                 return "<html>profile a</html>"
             return None
 
-        mock = _mock_client(fetch_side_effect=side_effect)
-        with patch("commands.fetch_profiles.ScraperClient", return_value=mock):
-            await run(listings_path)
+        mock = _mock_pool(fetch_side_effect=side_effect)
+        with patch("commands.fetch_profiles.ScraperPool", return_value=mock), \
+             patch("commands.fetch_profiles.is_progress_enabled", return_value=False):
+            await run(listings_path, no_httpx=True)
 
         status_path = tmp_path / "fetch_status.json"
         assert status_path.exists()
@@ -196,15 +201,15 @@ class TestFetchOutcomes:
 class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_empty_listings_no_fetches(self, tmp_path):
-        """Empty listings dict -> no ScraperClient instantiation."""
+        """Empty listings dict -> no ScraperPool instantiation."""
         path = tmp_path / "listings.json"
         path.write_text("{}", encoding="utf-8")
 
-        mock = _mock_client()
-        with patch("commands.fetch_profiles.ScraperClient", return_value=mock):
-            await run(str(path))
+        mock = _mock_pool()
+        with patch("commands.fetch_profiles.ScraperPool", return_value=mock):
+            await run(str(path), no_httpx=True)
 
-        # ScraperClient context should never be entered
+        # ScraperPool context should never be entered
         mock.__aenter__.assert_not_awaited()
 
         # fetch_status.json still written (empty)
@@ -226,9 +231,10 @@ class TestEdgeCases:
                 raise RuntimeError("unexpected error")
             return "<html>good</html>"
 
-        mock = _mock_client(fetch_side_effect=side_effect)
-        with patch("commands.fetch_profiles.ScraperClient", return_value=mock):
-            await run(listings_path)
+        mock = _mock_pool(fetch_side_effect=side_effect)
+        with patch("commands.fetch_profiles.ScraperPool", return_value=mock), \
+             patch("commands.fetch_profiles.is_progress_enabled", return_value=False):
+            await run(listings_path, no_httpx=True)
 
         # Both fetches were attempted
         assert call_count == 2
@@ -399,3 +405,70 @@ class TestHttpxSweep:
 
         assert "uuid-cf" not in statuses
         assert "uuid-cf" in cf_blocked
+
+
+# ---------------------------------------------------------------------------
+# _write_status tests
+# ---------------------------------------------------------------------------
+
+class TestWriteStatus:
+    def test_writes_json(self, tmp_path):
+        from commands.fetch_profiles import _write_status
+
+        path = str(tmp_path / "status.json")
+        _write_status(path, {"uuid-1": "success"})
+
+        with open(path) as f:
+            data = json.load(f)
+        assert data == {"uuid-1": "success"}
+
+
+# ---------------------------------------------------------------------------
+# run() signature / two-phase tests
+# ---------------------------------------------------------------------------
+
+class TestRunSignature:
+    @pytest.mark.asyncio
+    async def test_run_accepts_new_params(self, tmp_path):
+        """run() should accept browsers, delay, page_wait, no_httpx params."""
+        listings = {"uuid-1": _fake_listing("uuid-1")}
+        listings_path = _write_listings(tmp_path, listings)
+        (tmp_path / "html").mkdir()
+
+        mock_sweep = AsyncMock(return_value=({"uuid-1": "success"}, {}))
+
+        with patch("commands.fetch_profiles._httpx_sweep", mock_sweep), \
+             patch("commands.fetch_profiles.ScraperPool"), \
+             patch("commands.fetch_profiles.is_progress_enabled", return_value=False):
+            from commands.fetch_profiles import run
+            result = await run(
+                listings_path,
+                browsers=2,
+                delay=(1.0, 2.0),
+                page_wait=0.5,
+                no_httpx=False,
+            )
+
+        assert result == str(tmp_path)
+
+    @pytest.mark.asyncio
+    async def test_no_httpx_skips_sweep(self, tmp_path):
+        """no_httpx=True should skip httpx sweep and go straight to browser."""
+        listings = {"uuid-1": _fake_listing("uuid-1")}
+        listings_path = _write_listings(tmp_path, listings)
+        (tmp_path / "html").mkdir()
+
+        mock_sweep = AsyncMock()
+
+        mock_pool = AsyncMock()
+        mock_pool.fetch = AsyncMock(return_value="<html>ok</html>")
+        mock_pool.__aenter__ = AsyncMock(return_value=mock_pool)
+        mock_pool.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("commands.fetch_profiles._httpx_sweep", mock_sweep), \
+             patch("commands.fetch_profiles.ScraperPool", return_value=mock_pool), \
+             patch("commands.fetch_profiles.is_progress_enabled", return_value=False):
+            from commands.fetch_profiles import run
+            await run(listings_path, no_httpx=True)
+
+        mock_sweep.assert_not_awaited()

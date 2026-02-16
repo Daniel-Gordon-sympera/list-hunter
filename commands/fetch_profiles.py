@@ -19,6 +19,7 @@ import httpx
 
 import config
 from http_client import ScraperClient, ScraperPool, is_cloudflare_challenge, is_cloudflare_challenge_response
+from progress import is_progress_enabled
 
 log = logging.getLogger(__name__)
 
@@ -184,13 +185,39 @@ async def _fetch_one(
     return uuid, "failed"
 
 
-async def run(listings_path: str, *, force: bool = False, retry_cf: bool = False) -> str:
+BATCH_SIZE = 100
+
+
+def _write_status(path: str, statuses: dict[str, str]) -> None:
+    """Write fetch status dict to disk."""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(statuses, f, indent=2, ensure_ascii=False)
+
+
+async def run(
+    listings_path: str,
+    *,
+    force: bool = False,
+    retry_cf: bool = False,
+    browsers: int = 1,
+    delay: tuple[float, float] | None = None,
+    page_wait: float | None = None,
+    no_httpx: bool = False,
+) -> str:
     """Fetch profile HTML for every attorney in listings.json.
+
+    Two-phase approach:
+    - Phase 1 (httpx sweep): Try all profiles with raw httpx (fast).
+    - Phase 2 (browser mop-up): Retry CF-blocked profiles with ScraperPool.
 
     Args:
         listings_path: Path to listings.json (dict of {uuid: record_dict}).
-        force: If True, re-download HTML even if the file already exists on disk.
-        retry_cf: If True, re-download HTML files that are Cloudflare challenge pages.
+        force: Re-download HTML even if files exist on disk.
+        retry_cf: Re-download only Cloudflare challenge pages.
+        browsers: Number of browser instances for Phase 2 fallback.
+        delay: (min, max) inter-request delay in seconds.
+        page_wait: Seconds to wait for JS after page load (browser only).
+        no_httpx: Skip httpx sweep, use browser for all requests.
 
     Returns:
         Path to the data directory containing html/ and fetch_status.json.
@@ -201,8 +228,12 @@ async def run(listings_path: str, *, force: bool = False, retry_cf: bool = False
     data_dir = os.path.dirname(listings_path)
     html_dir = os.path.join(data_dir, "html")
     os.makedirs(html_dir, exist_ok=True)
+    status_path = os.path.join(data_dir, "fetch_status.json")
 
-    # Partition into skipped (already on disk) vs. to-fetch
+    delay_min = delay[0] if delay else None
+    delay_max = delay[1] if delay else None
+
+    # Partition into skipped vs to-fetch
     to_fetch: dict[str, dict] = {}
     statuses: dict[str, str] = {}
 
@@ -221,65 +252,90 @@ async def run(listings_path: str, *, force: bool = False, retry_cf: bool = False
 
     skipped = len(statuses)
     total = len(to_fetch)
-    log.info(
-        "Profiles to fetch: %d (skipping %d already on disk)", total, skipped
-    )
+    log.info("Profiles to fetch: %d (skipping %d already on disk)", total, skipped)
 
-    if to_fetch:
-        # Set up progress bar if available
-        from progress import FetchProgress, is_progress_enabled
+    if not to_fetch:
+        _write_status(status_path, statuses)
+        log.info("Nothing to fetch.")
+        return data_dir
 
-        fetch_progress = None
-        on_complete = None
-        if is_progress_enabled():
-            fetch_progress = FetchProgress(total=total)
-            fetch_progress.start()
-            on_complete = fetch_progress.advance
+    # Set up progress bar
+    from progress import FetchProgress
 
-        try:
-            async with ScraperClient() as client:
-                tasks = [
-                    _fetch_one(
-                        client,
-                        uuid,
-                        record,
-                        html_dir,
-                        index=i + 1,
-                        total=total,
-                        on_complete=on_complete,
-                    )
-                    for i, (uuid, record) in enumerate(to_fetch.items())
-                ]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-        finally:
-            if fetch_progress:
-                fetch_progress.stop()
+    fetch_progress = None
+    on_complete = None
+    if is_progress_enabled():
+        fetch_progress = FetchProgress(total=total)
+        fetch_progress.start()
+        on_complete = fetch_progress.advance
 
-        for result in results:
-            if isinstance(result, BaseException):
-                log.error("Task raised exception: %s", result)
-                # We cannot determine the uuid from a bare exception,
-                # but this path should be rare since _fetch_one catches
-                # fetch failures internally.
-                continue
-            uuid, status = result
-            statuses[uuid] = status
+    try:
+        browser_targets = to_fetch  # default: all go to browser
 
-    # Compute summary counts
+        # Phase 1: httpx sweep (unless disabled)
+        if not no_httpx:
+            log.info("Phase 1: httpx sweep (%d profiles)", len(to_fetch))
+            httpx_statuses, cf_blocked = await _httpx_sweep(
+                to_fetch,
+                html_dir,
+                delay_min=delay_min or config.DELAY_MIN,
+                delay_max=delay_max or config.DELAY_MAX,
+                on_complete=on_complete,
+            )
+            statuses.update(httpx_statuses)
+            _write_status(status_path, statuses)
+            browser_targets = cf_blocked
+            log.info(
+                "Phase 1 complete: %d via httpx, %d need browser fallback",
+                len(httpx_statuses), len(cf_blocked),
+            )
+
+        # Phase 2: browser mop-up (for CF-blocked or all if no_httpx)
+        if browser_targets:
+            log.info("Phase 2: browser fallback (%d profiles, %d browser(s))",
+                     len(browser_targets), browsers)
+
+            async with ScraperPool(
+                num_browsers=browsers,
+                delay_min=delay_min,
+                delay_max=delay_max,
+                page_wait=page_wait,
+            ) as pool:
+                items = list(browser_targets.items())
+                batch_size = max(BATCH_SIZE, browsers * 3 * 5)
+
+                for batch_start in range(0, len(items), batch_size):
+                    batch = items[batch_start:batch_start + batch_size]
+                    tasks = [
+                        _fetch_one(
+                            pool, uuid, record, html_dir,
+                            index=batch_start + i + 1,
+                            total=len(browser_targets),
+                            on_complete=on_complete,
+                        )
+                        for i, (uuid, record) in enumerate(batch)
+                    ]
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                    for result in results:
+                        if isinstance(result, BaseException):
+                            log.error("Task raised exception: %s", result)
+                            continue
+                        uuid, status = result
+                        statuses[uuid] = status
+
+                    _write_status(status_path, statuses)
+    finally:
+        if fetch_progress:
+            fetch_progress.stop()
+
+    # Final summary
     success = sum(1 for s in statuses.values() if s == "success")
     failed = sum(1 for s in statuses.values() if s == "failed")
     skipped = sum(1 for s in statuses.values() if s == "skipped")
-
-    # Persist fetch status
-    status_path = os.path.join(data_dir, "fetch_status.json")
-    with open(status_path, "w", encoding="utf-8") as f:
-        json.dump(statuses, f, indent=2, ensure_ascii=False)
-
     log.info(
         "Fetch complete: %d success, %d failed, %d skipped",
-        success,
-        failed,
-        skipped,
+        success, failed, skipped,
     )
 
     return data_dir
