@@ -11,3 +11,4 @@ spike.py
 .env
 .claude/
 resources/
+*.crt

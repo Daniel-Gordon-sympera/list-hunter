@@ -56,7 +56,7 @@ async def _httpx_fetch_one(
         log.debug("httpx error for %s: %s", uuid, exc)
         if on_complete:
             on_complete()
-        return uuid, "failed"
+        return uuid, "cf_blocked"
 
     if response.status_code == 404:
         log.debug("httpx 404 for %s", uuid)
@@ -68,7 +68,7 @@ async def _httpx_fetch_one(
         log.debug("httpx %d for %s", response.status_code, uuid)
         if on_complete:
             on_complete()
-        return uuid, "failed"
+        return uuid, "cf_blocked"
 
     html = response.text
     headers = dict(response.headers)
@@ -116,11 +116,15 @@ async def _httpx_sweep(
                 httpx_client, uuid, record, html_dir, on_complete=on_complete,
             )
 
+    import ssl
+    ssl_ctx = ssl.create_default_context(cafile=config.BRD_CA_CERT) if proxy_url else True
+
     async with httpx.AsyncClient(
         proxy=proxy_url,
         headers=_HTTPX_HEADERS,
         timeout=config.REQUEST_TIMEOUT,
         follow_redirects=True,
+        verify=ssl_ctx,
     ) as httpx_client:
         tasks = [
             bounded_fetch(httpx_client, uuid, record)

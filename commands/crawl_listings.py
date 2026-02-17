@@ -378,11 +378,15 @@ async def run(
         httpx_client = None
         httpx_cm = None
         if not no_httpx:
+            import ssl
+            ssl_ctx = ssl.create_default_context(cafile=config.BRD_CA_CERT) if config.PROXY_URL else True
+
             httpx_cm = httpx.AsyncClient(
                 proxy=config.PROXY_URL,
                 headers=_HTTPX_HEADERS,
                 timeout=config.REQUEST_TIMEOUT,
                 follow_redirects=True,
+                verify=ssl_ctx,
             )
 
         # Set up browser pool for fallback

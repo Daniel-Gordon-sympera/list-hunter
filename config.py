@@ -12,6 +12,7 @@ PROXY_SERVER = os.environ.get("PROXY_SERVER")
 PROXY_PORT = os.environ.get("PROXY_PORT")
 PROXY_USERNAME = os.environ.get("PROXY_USERNAME")
 PROXY_PASSWORD = os.environ.get("PROXY_PASSWORD")
+BRD_CA_CERT = os.environ.get("BRD_CA_CERT", "./brightdata_ca.crt")
 
 # URLs
 BASE_URL = "https://attorneys.superlawyers.com"

@@ -332,7 +332,7 @@ class TestHttpxFetchOne:
         assert status == "failed"
 
     @pytest.mark.asyncio
-    async def test_returns_failed_on_exception(self, tmp_path):
+    async def test_returns_cf_blocked_on_exception(self, tmp_path):
         from commands.fetch_profiles import _httpx_fetch_one
 
         html_dir = str(tmp_path / "html")
@@ -344,7 +344,7 @@ class TestHttpxFetchOne:
         uuid, status = await _httpx_fetch_one(
             mock_client, "uuid-1", _fake_listing("uuid-1"), html_dir,
         )
-        assert status == "failed"
+        assert status == "cf_blocked"
 
 
 # ---------------------------------------------------------------------------
